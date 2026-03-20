@@ -1,0 +1,57 @@
+{
+  "format_version": "1.8.0",
+  "minecraft:spawn_rules": {
+    "description": {
+      "identifier": "pokeworld:wild_finneon",
+      "population_control": "animal"
+    },
+    "conditions": [
+      {
+        "minecraft:spawns_underwater": {},
+        "minecraft:density_limit": {
+          "surface": 5
+        },
+        "minecraft:herd": {
+          "min_size": 2,
+          "max_size": 4
+        },
+        "minecraft:difficulty_filter": {
+          "min": "easy",
+          "max": "hard"
+        },
+        "minecraft:weight": {
+          "default": 100
+        },
+        "minecraft:permute_type": [
+          {
+            "weight": 20,
+            "entity_type": "pokeworld:wild_lumineon"
+          },
+          {
+            "weight": 70
+          }
+        ],
+        "minecraft:delay_filter": {
+          "min": 10,
+          "max": 20,
+          "identifier": "pokeworld:wild_finneon",
+          "spawn_chance": 100
+        },
+        "minecraft:biome_filter": {
+          "any_of": [
+            {
+              "test": "has_biome_tag",
+              "operator": "==",
+              "value": "ocean"
+            },
+            {
+              "test": "has_biome_tag",
+              "operator": "==",
+              "value": "river"
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

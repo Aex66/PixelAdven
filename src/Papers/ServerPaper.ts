@@ -1,0 +1,79 @@
+
+import { system, world } from '@minecraft/server';
+import Database from './DatabasePaper.js';
+import Player from './PlayerPaper.js';
+
+/*
+ * ROT's command queue system 
+*/
+const commandQueue = [] as unknown as [string[]];
+system.runInterval(() => {
+    if(!commandQueue.length) return;
+    const hundred = commandQueue.slice(0, 100);
+    commandQueue.splice(0, 100);
+    for(let i = 0; i < 100; i++) {
+        if(!hundred[i]) return;
+        world.getDimension(hundred[i][1] ?? 'overworld').runCommand(hundred[i][0])
+    }
+}, 5);
+
+/*
+ * Welcome to the Server Paper!
+ * Main Developer: notbeer
+ * Notes: Broadcast is WAY better now
+ * Sub developer: Mo9ses
+ * Link to name: Server Paper
+*/
+class ServerPaper {
+    db: database;
+    /**
+     * Starts the database server
+     */
+    async startServer(): Promise<1> {
+        this.db = await Database.register('server');
+        return 1;
+    }
+    /**
+     * Broadcast a message to everyone in game
+     * @param {string} message Message you want to broadcast in chat
+     * @param {string} use The name of the use?
+     * @returns {void} Nothing
+     * @example .broadcast('Hello World!', 'Computer');
+     */
+    broadcast(message: string, use?: string, sound?: boolean, tag?: string): void {
+        if(tag) return world.getAllPlayers().forEach(p => p.hasTag(tag) && Player.send(p, message, use, sound));
+        world.getAllPlayers().forEach(p => Player.send(p, message, use, sound));
+    }
+    /**
+    * Push commands to the command queue
+    * @param command The command you want to run
+    * @param dimension The dimension you want the command run
+    * @returns {void} Nothing
+    * @example .queueCommand('say Hello World!');
+    */
+    queueCommand(command: string, dimension?: string): void {
+        commandQueue.push(dimension ? [command, dimension] : [command]);
+    }
+    /**
+    * Queue an array of commands
+    * @param {Array<string>} commands The commands you want to run
+    * @param dimension The dimension you want the commands run
+    * @returns {void} Nothing
+    * @example .queueCommands(['say Hello World!', 'say Goodbye World!]);
+    */
+    queueCommands(commands: string[], dimension?: string): void {
+        commands.forEach(c => commandQueue.push(dimension ? [c] : [c, dimension]));
+    }
+    /**
+    * Run a asynchronous command in game that will run at runtime
+    * @param command The command you want to run
+    * @param dimension The dimension you want the command run
+    * @returns {string} command had error
+    * @example .runCommand('say Hello World!');
+    */
+    runCommand(command: string, dimension?: string){
+        return world.getDimension(dimension ?? 'overworld').runCommand(command)
+    }
+}
+const Server = new ServerPaper();
+export default Server;

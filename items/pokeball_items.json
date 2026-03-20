@@ -1,0 +1,132 @@
+//bridge-file-version: #5
+{
+	"format_version": "1.19.10",
+	"minecraft:entity": {
+		"description": {
+			"identifier": "pokeworld:pokeball_items",
+			"is_spawnable": false,
+			"is_summonable": true,
+			"is_experimental": false
+		},
+		"component_groups": {
+			"pokeworld:despawn_timer": {
+				"minecraft:ageable": {
+					"duration": 3,
+					"grow_up": {
+						"event": "pokeworld:despawn",
+						"target": "self"
+					}
+				}
+			}
+		},
+		"components": {
+			"minecraft:type_family": {
+				"family": [
+					"pokeball"
+				]
+			},
+			"minecraft:health": {
+				"value": 1,
+				"max": 1
+			},
+			"minecraft:scale": {
+				"value": 1
+			},
+			"minecraft:push_through": {
+				"value": 0
+			},
+			"minecraft:collision_box": {
+				"width": 0.9,
+				"height": 1.9
+			},
+			"minecraft:navigation.walk": {
+				"can_path_over_water": true,
+				"avoid_water": true,
+				"avoid_damage_blocks": true
+			},
+			"minecraft:behavior.float": {
+				"priority": 0
+			},
+			"minecraft:pushable": {
+				"is_pushable": false,
+				"is_pushable_by_piston": false
+			},
+			"minecraft:physics": {
+				"has_gravity": true,
+				"has_collision": true
+			},
+			"minecraft:damage_sensor": {
+				"triggers": [
+					{
+						"cause": "all",
+						"deals_damage": false
+					}
+				]
+			},
+			"minecraft:interact": {
+				"interactions": [
+					{
+						"interact_text": "action.interact.open.gift",
+						"on_interact": {
+							"event": "pokeworld:gift"
+						},
+						"cooldown": 10
+					}
+				]
+			}
+		},
+		"events": {
+			"pokeworld:despawn": {
+				"run_command": {
+					"command": [
+						"kill @s"
+					]
+				}
+			},
+			"pokeworld:gift": {
+				"run_command": {
+					"command": [
+						"playanimation @s animation.pokeball_gift.open"
+					]
+				},
+				"trigger": "pokeworld:reward",
+				"add": {
+					"component_groups": [
+						"pokeworld:despawn_timer"
+					]
+				}
+			},
+			"pokeworld:reward": {
+				"randomize": [
+					{
+						"weight": 50,
+						"run_command": {
+							"command": [
+								"give @p[r=3] pokeworld:event_coin 1",
+								"tellraw @p[r=3] {\"rawtext\":[{\"text\":\"§4Congrats!!!...\"},{\"selector\": \"@p\"},{\"text\":\" §5Recieved 1 Event Coin!!!\"}]}"
+							]
+						}
+					},
+					{
+						"weight": 35,
+						"run_command": {
+							"command": [
+								"give @p[r=3] pokeworld:event_coin 3",
+								"tellraw @p[r=3] {\"rawtext\":[{\"text\":\"§4Congrats!!!...\"},{\"selector\": \"@p\"},{\"text\":\" §5Recieved 3 Event Coins!!!\"}]}"
+							]
+						}
+					},
+					{
+						"weight": 15,
+						"run_command": {
+							"command": [
+								"give @p[r=3] pokeworld:event_coin 5",
+								"tellraw @p[r=3] {\"rawtext\":[{\"text\":\"§4Congrats!!!...\"},{\"selector\": \"@p\"},{\"text\":\" §5Recieved 5 Event Coins!!!\"}]}"
+							]
+						}
+					}
+				]
+			}
+		}
+	}
+}

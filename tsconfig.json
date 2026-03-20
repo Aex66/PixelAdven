@@ -1,0 +1,25 @@
+{
+    "compilerOptions": {
+        "module": "ES2022",
+        "moduleResolution": "node",
+        "target": "ES2022",
+        "lib": [
+            "ES2021",
+            "DOM"
+        ],
+        "allowSyntheticDefaultImports": true,
+        "noImplicitAny": true,
+        "preserveConstEnums": true,
+        "sourceMap": false,
+        "outDir": "scripts",
+        "experimentalDecorators": true
+    },
+    "exclude": [
+        "src/Epics/!Cache"
+    ],
+    "include": [
+        "src",
+        "scripts/Letters/generatePokemonAbilities.js",
+        "scripts/Epics/Misc/transfer-server.js"
+    ]
+}

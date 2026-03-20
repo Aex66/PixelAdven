@@ -1,0 +1,13 @@
+const SizeList = [
+    'None',//0
+    'XXXS',//1
+    'XXS',//2
+    'XS',//3
+    'S',//4
+    'M',//5
+    'L',//6
+    'XL',//7
+    'XXL',//8
+    'XXXL',//9
+] as const;
+export default SizeList;

@@ -1,0 +1,63 @@
+{
+	"format_version": 2,
+	"header": {
+		"name": "§6§lROT Pixelmon§r",
+		"description": "§eThis pack was made for CHG Artic Wolf. Nobody else should see this. A",
+		"uuid": "87933bae-b777-4d2e-b2c0-047f82ae2a5a",
+		"version": [
+			3,
+			3,
+			3
+		],
+		"min_engine_version": [
+			1,
+			20,
+			10
+		]
+	},
+	"modules": [
+		{
+			"description": "§cWelcome to §4§lROT§r§c! §4§lROT§r§c is a Minecraft Bedrock addon designed to make §6§lYOUR§r§c Minecraft server §4§lBETTER§r§c! Remember to use \"§7!help§c\"!§r",
+			"type": "data",
+			"uuid": "61db8302-c5aa-4d2d-bffa-ec175452b6aa",
+			"version": [
+				3,
+				3,
+				3
+			]
+		},
+		{
+			"description": "§c§lROT API Gametest Modifier. Remember to use §7!help§r",
+			"language": "javascript",
+			"type": "script",
+			"uuid": "f0dcb5d4-c9a1-48d0-92d2-a7c7d0b89532",
+			"version": [
+				3,
+				3,
+				3
+			],
+			"entry": "scripts/import.js"
+		}
+	],
+	"dependencies": [
+		{
+			"module_name": "@minecraft/server",
+			"version": "2.1.0-beta"
+		},
+		{
+			"module_name": "@minecraft/server-ui",
+			"version": "2.1.0-beta"
+		},
+		{
+			"module_name": "@minecraft/server-admin",
+			"version": "1.0.0-beta"
+		}
+	],
+	"metadata": {
+		"generated_with": {
+			"bridge": [
+				"1.8.5"
+			]
+		}
+	}
+}
