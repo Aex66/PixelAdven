@@ -1,0 +1,380 @@
+---
+description: Complete knowledge base for implementing a Pokemon Showdown-based battle system in a Minecraft Bedrock addon. Covers architecture, protocol, flow, AI, UI, and post-battle processing.
+alwaysApply: true
+---
+
+# Pokemon Showdown Battle System — Implementation Guide for Minecraft Bedrock Addons
+
+This rule contains everything needed to implement a fully-functional Pokemon battle system powered by the Pokemon Showdown simulator inside a Minecraft Bedrock addon (Script API). The system described here is a **reference architecture** — implement it with your own patterns, naming, and structure. Do NOT copy class names or file organization from any existing implementation.
+
+---
+
+## 1. Core Architecture Overview
+
+The battle system has two layers:
+
+**Simulation Layer** — A bundled/modified version of Pokemon Showdown (`@pkmn/sim` or a fork) that handles ALL battle mechanics: damage calculation, type effectiveness, abilities, items, weather, terrain, stat stages, status conditions, PP, accuracy, priority, etc. You do NOT reimplement battle logic — Showdown does it all.
+
+**Integration Layer** — Your addon code that:
+- Creates and manages `BattleStream` instances
+- Packs Pokemon data into Showdown's team format (`PokemonSet`)
+- Writes player/AI choices to the stream
+- Reads and interprets Showdown protocol output
+- Maps protocol events to in-game visuals (HP bars, entity spawns, logs, animations)
+- Manages battle lifecycle (start, turns, end, rewards)
+
+---
+
+## 2. The Showdown Package (What You Need)
+
+You need a modified Pokemon Showdown package as an npm dependency. Key exports:
+
+- `BattleStream` — Duplex stream for battle communication
+- `Teams` — Pack/unpack teams to Showdown's wire format
+- `PokemonSet` — TypeScript type for a single Pokemon's data
+- `RandomPlayerAI` — Simple AI that picks random valid moves
+- `BattlePlayer` — Base class for AI players
+- `Dex`, `Moves`, `Pokedex`, `Learnsets` — Data access
+- `Format`, `TeamValidator` — Format definitions and team validation
+
+### Required Modifications to Showdown
+
+Standard Showdown assumes Node.js. For Bedrock Script API you need:
+- Replace `crypto` usage with fallback PRNG (no `node:crypto` in Bedrock)
+- Replace dynamic `require()` with static imports (esbuild bundling)
+- Remove `node:util` dependencies (use custom `isDeepStrictEqual`)
+- Extend `PokemonSet` with: `uuid` (unique Pokemon ID), `currentHealth` (actual HP for mid-health battles), `movesInfo` (array of `{maxPp, pp}` per move for PP tracking)
+- Add `forceforme` command to BattleStream for in-battle evolution/forme changes
+- Add bag item system: `useBagItem(itemId, moveName?)` on Pokemon, `processBagItem(itemId, targetLoc?)` on Side
+- Extend team pack/unpack to handle the extra fields (uuid, currentHealth, status, movesInfo)
+
+### Custom Format Definition
+
+Define your own format(s):
+
+```typescript
+{
+  effectType: 'Format',
+  mod: 'youraddon',       // your mod identifier
+  name: '[YourAddon] Singles',
+  gameType: 'singles',    // or 'doubles', 'triples', 'multi'
+  ruleset: ['Obtainable', 'Endless Battle Clause', 'Cancel Mod', 'Sleep Clause', 'HP Percentage Mod'],
+  banlist: ['Arena Trap', 'Moody', 'Shadow Tag', ...],
+  playerCount: 2,
+  rated: false,
+}
+```
+
+---
+
+## 3. BattleStream Communication Protocol
+
+### Writing TO Showdown (Input Commands)
+
+All commands are prefixed with `>`:
+
+| Command | Format | Purpose |
+|---------|--------|---------|
+| Start | `>start {"format":"[YourAddon] Singles"}` | Initialize battle |
+| Add Player | `>player p1 {"name":"Ash","team":"<packed>"}` | Register player with packed team |
+| Move | `>p1 move thunderbolt` or `>p1 move 2` | Use a move (by name or 1-based index) |
+| Move + Target | `>p1 move 1 2` | Move with target (doubles: positive=foe, negative=ally) |
+| Move + Mega | `>p1 move 1 mega` | Move with mega evolution |
+| Switch | `>p1 switch 3` | Switch to party slot (1-based) |
+| Multi-action | `>p1 move 1 2, switch 3` | Doubles: action per active slot, comma-separated |
+| Pass | `>p1 pass` | Skip action (used in force-switch when slot doesn't need action) |
+| Bag Item | `>p1 bag-item potion 1` | Use bag item on target slot |
+| Used Ball | `>p1 used-ball` | Signal Poke Ball usage |
+| Force Tie | `>forcetie` | End battle as tie (used for "Run") |
+| Force Forme | `>forceforme p1a\|Species\|details\|hp/maxhp\|source` | In-battle evolution |
+
+### Reading FROM Showdown (Output Messages)
+
+Output is `type\npayload`:
+
+**`update`** — Public battle log. Contains lines like:
+```
+update
+|move|p1a: Pikachu|Thunderbolt|p2a: Squirtle
+|-supereffective|p2a: Squirtle
+|-damage|p2a: Squirtle|45/100
+|
+```
+
+**`sideupdate`** — Private per-side data:
+```
+sideupdate
+p1
+|request|{"active":[...],"side":{"pokemon":[...]},"rqid":3}
+```
+
+**`end`** — Battle finished:
+```
+end
+{"winner":"p1","turns":12,"p1":"Ash","p2":"Gary",...}
+```
+
+### Split Messages (Private vs Public HP)
+
+Some messages use `|split|pN` to separate private (exact HP) from public (percentage):
+```
+|split|p1
+|-damage|p1a: Pikachu|Pokemon Specific: 89/267
+|-damage|p1a: Pikachu|33/100
+```
+Use the private line for the owning player, public for others.
+
+---
+
+## 4. Complete Protocol Message Reference
+
+### Public Update Messages (handle all of these)
+
+**Battle Setup:** `|player|`, `|teamsize|`, `|gametype|`, `|gen|`, `|tier|`, `|rule|`, `|start`, `|clearpoke`, `|poke|`, `|teampreview`, `|t:|`
+
+**Turn Flow:** `|turn|N`, `|upkeep`
+
+**Actions:** `|move|POKEMON|MOVE|TARGET`, `|switch|POKEMON|DETAILS|HP STATUS`, `|drag|POKEMON|DETAILS|HP STATUS`, `|replace|POKEMON|DETAILS`
+
+**Damage/Healing (via split):** `|-damage|POKEMON|HP STATUS`, `|-heal|POKEMON|HP STATUS`, `|-sethp|POKEMON|HP STATUS`
+
+**Status:** `|-status|POKEMON|STATUS`, `|-curestatus|POKEMON|STATUS`, `|-cureteam|POKEMON`
+
+**Stat Changes:** `|-boost|POKEMON|STAT|AMOUNT`, `|-unboost|POKEMON|STAT|AMOUNT`, `|-setboost|POKEMON|STAT|AMOUNT`, `|-clearboost|POKEMON`, `|-clearallboost`, `|-clearpositiveboost|POKEMON`, `|-clearnegativeboost|POKEMON`, `|-swapboost|SOURCE|TARGET|STATS`
+
+**Abilities/Items:** `|-ability|POKEMON|ABILITY`, `|-endability|POKEMON`, `|-item|POKEMON|ITEM`, `|-enditem|POKEMON|ITEM`
+
+**Field Effects:** `|-weather|WEATHER`, `|-fieldstart|CONDITION`, `|-fieldend|CONDITION`, `|-fieldactivate|EFFECT`, `|-sidestart|SIDE|CONDITION`, `|-sideend|SIDE|CONDITION`
+
+**Combat Results:** `|-supereffective|POKEMON`, `|-resisted|POKEMON`, `|-crit|POKEMON`, `|-miss|SOURCE|TARGET`, `|-immune|POKEMON`, `|-fail|POKEMON`, `|faint|POKEMON`, `|-hitcount|POKEMON|COUNT`, `|-killed|POKEMON` (custom)
+
+**Forme/Transform:** `|detailschange|POKEMON|DETAILS`, `|-formechange|POKEMON|SPECIES`, `|-transform|POKEMON|TARGET`, `|-mega|POKEMON|STONE`, `|-primal|POKEMON`
+
+**Volatile Status:** `|-start|POKEMON|EFFECT`, `|-end|POKEMON|EFFECT`, `|-activate|POKEMON|EFFECT`, `|-singleturn|POKEMON|MOVE`
+
+**Other:** `|cant|POKEMON|REASON`, `|-mustrecharge|POKEMON`, `|-prepare|POKEMON|MOVE`, `|-nothing`, `|-anim|SOURCE|MOVE|TARGET`
+
+**End:** `|win|PLAYER`, `|tie`
+
+---
+
+## 5. Battle Flow (Step by Step)
+
+### Phase 1: Initiation
+1. Something triggers a battle (player hits wild Pokemon, interacts with trainer, PvP request accepted)
+2. Create participant objects (player controller, wild AI controller, trainer AI controller)
+3. Each participant packs their Pokemon team into `PokemonSet[]` format
+4. Create `BattleStream`
+5. Start async loop reading from stream
+6. After a short delay (~1s): send `>start` with format, then `>player pN` for each participant
+
+### Phase 2: Turn Loop
+1. Showdown sends `|request|` to each side with available choices
+2. Queue these requests — don't deliver to actors until `|turn|N` arrives
+3. On `|turn|N`: deliver queued requests to actors
+4. **Player actor**: Show UI form with moves/switch/bag/run options; wait for selection; write choice to stream
+5. **AI actor**: Run AI logic; after a 2-4 second delay (realism); write choice to stream
+6. Showdown processes choices and emits protocol messages (move, damage, status, faint, etc.)
+7. Your interpreter maps each message to game actions (update HP, show log, play effects)
+8. Repeat from step 1
+
+### Phase 3: Battle End
+1. Showdown sends `|win|PLAYER` or `|tie|`, then `end` with JSON data
+2. Parse winner from end data
+3. After a short delay (~3s): run end-of-battle logic
+4. Process rewards: EXP distribution, EV gains, level-ups, item drops, quest progress
+5. Return all Pokemon entities to their balls
+6. Show battle summary to player
+7. Clean up: destroy stream, clear intervals, remove battle from active list
+
+### Key Timing Pattern
+Use a **log queue** system: protocol messages go into a queue, processed on a 1-second interval. Each message is displayed, then its `onSent` callback runs. This creates natural pacing for battle events.
+
+---
+
+## 6. Team Packing — Pokemon Data to Showdown Format
+
+Map your Pokemon data model to `PokemonSet`:
+
+| Your Pokemon Field | Showdown Field | Notes |
+|--------------------|----------------|-------|
+| Unique ID | `uuid` | Custom field for tracking |
+| Nickname | `name` | Display name |
+| Species identifier | `species` | Lowercase species name (e.g. "pikachu") |
+| Held item | `item` | Lowercase no-spaces (e.g. "leftovers") |
+| Ability | `ability` | Ability name |
+| Move names | `moves` | Array of move names |
+| Move PP data | `movesInfo` | Array of `{maxPp, pp}` — custom field |
+| Nature | `nature` | Nature name (e.g. "Adamant") |
+| Gender | `gender` | `'M'`, `'F'`, or `''` |
+| IVs per stat | `ivs` | `{hp, atk, def, spa, spd, spe}` |
+| EVs per stat | `evs` | `{hp, atk, def, spa, spd, spe}` |
+| Level | `level` | 1-100 |
+| Shiny | `shiny` | Boolean |
+| Happiness | `happiness` | 0-255 |
+| Current HP | `currentHealth` | Custom field — actual HP (not max) |
+| Caught-in ball | `pokeball` | Ball type |
+
+For wild Pokemon without a full model: construct `PokemonSet` from the entity's dynamic properties (level, IVs, EVs, moves, ability, nature, gender).
+
+---
+
+## 7. Actor System Design
+
+Design an actor hierarchy:
+
+### Base Actor
+- Holds reference to battle, stream, and showdown side ID (`p1`, `p2`)
+- Abstract methods: `packTeam()`, `receiveRequest()`, `onBattleEnd()`, `displayLog()`
+- Tracks Pokemon info per battle position (e.g. `p1a`, `p1b` for doubles)
+
+### Player Actor
+- Wraps a Minecraft `Player` entity
+- `receiveRequest()` → show ActionForm UI with move/switch/bag/run buttons
+- `onBattleEnd()` → process EXP, EVs, level-ups, show summary
+- Manages party tracking (which Pokemon participated, for EXP sharing)
+- Handles Poke Ball catching flow (in wild battles)
+- Registers post-battle callbacks when Pokemon are KO'd (for delayed EXP/EV processing)
+
+### Wild Pokemon Actor
+- Wraps a wild Pokemon entity
+- Uses `RandomPlayerAI` for move selection
+- `receiveRequest()` → AI chooses, delayed write to stream (2-4s)
+- `onBattleEnd()` → despawn entity, drop items if applicable
+
+### Trainer Actor
+- Wraps a trainer NPC entity
+- Uses `RandomPlayerAI` (easy) or heuristic AI (hard) based on difficulty
+- Has a pre-defined party from trainer data
+- `onBattleEnd()` → award money/items, handle win/loss scenarios
+
+### Spectator Actor (optional)
+- Players watching the battle
+- Receives log display updates but sends no commands
+
+---
+
+## 8. Player UI Flow (Minecraft Forms)
+
+### Main Action Screen (ActionForm)
+For each active Pokemon slot, show:
+1. **Move buttons** — One per known move. Show: name, type icon, PP remaining/max, power, accuracy. Disabled if no PP or blocked.
+2. **Bag button** — Opens bag submenu (healing items, PP restore, Poke Balls in wild). Disabled if bag not allowed.
+3. **Switch button** — Opens party list of non-active, non-fainted Pokemon. Disabled if trapped or not allowed.
+4. **Run button** — Ends battle as tie. Disabled if not allowed (trainer battles).
+5. **Mega Evolution toggle** — If player has mega item and Pokemon has mega stone. Can only mega once per battle.
+
+### Move Target Selection (Doubles/Triples)
+After selecting a move, if targeting is needed, show target selection form based on `MoveTarget`:
+- `adjacentFoe` — choose which opponent
+- `adjacentAllyOrSelf` — choose ally or self
+- `allAdjacentFoes`, `all`, `self` — auto-target, no form needed
+
+### Bag Screen
+Categories of usable items from player inventory:
+- Healing (Potions, Berries) → use on active Pokemon
+- PP Restore (Leppa Berry, Elixir) → select which move to restore
+- Revives → select which fainted party member
+- Poke Balls (wild only) → triggers catch sequence
+
+### Switch Screen
+List non-active party Pokemon. Skip fainted unless force-switch. Show species, level, HP, status.
+
+### Force Switch
+When a Pokemon faints or is forced out, show switch screen with no back button. Player MUST pick.
+
+### Wait Screen
+Between turns, show battle log (last ~6 messages), current turn, weather/terrain. Subtitle "..." to indicate waiting.
+
+---
+
+## 9. Post-Battle Processing
+
+### EXP Distribution
+When a Pokemon is KO'd (`|-killed|` message), register a callback:
+- Identify which of the winner's Pokemon participated against the KO'd Pokemon
+- On battle end, calculate EXP: `base_exp * fainted_level / 5 * (1/S) * modifiers`
+  - `S` = number of participants (or split with Exp. Share holders)
+  - Modifiers: Lucky Egg (1.5x), traded Pokemon (1.5x), Exp. Share (0.5x for non-participants)
+- Apply EXP to each eligible Pokemon
+- Track level-ups for summary display
+
+### EV Distribution
+From the KO'd Pokemon's species EV yield data:
+- Each participant gains EVs (respecting 510 total / 252 per stat caps)
+- Power items add +8 to their matching stat
+
+### Battle Summary
+Show results form after battle ends:
+- Win/Loss/Tie/Fled status
+- Per-Pokemon: EXP gained, levels gained, EVs gained
+- Items received (trainer battles)
+- Money earned
+
+### Pokemon State Sync
+After battle, sync Showdown state back to your Pokemon models:
+- Current HP
+- PP for each move
+- Status conditions
+- Any stat changes from items/abilities during battle
+
+---
+
+## 10. Catch System (Wild Battles)
+
+When player uses a Poke Ball:
+1. Send `>pN used-ball` to Showdown (consumes the turn)
+2. Calculate catch rate: `catchRate = (3 * maxHP - 2 * currentHP) * grassRate * ballBonus / (3 * maxHP) * statusBonus`
+3. Ball bonuses vary by ball type (Ultra Ball = 2x, Timer Ball = scales with turns, etc.)
+4. Status bonuses: Sleep/Freeze = 2.5x, Paralysis/Poison/Burn = 1.5x
+5. Determine shakes: `shakeChance = 65536 / (255 / catchRate)^0.1875` — check 4 times
+6. Animate ball throws and shakes (0-3 shakes before break-out, or capture)
+7. On capture: create Pokemon model from wild data, add to player's PC/party
+
+---
+
+## 11. Forme Changes and Evolution
+
+### In-Battle Evolution
+Use `>forceforme position|NewSpecies|details|hp/maxhp|source`:
+- Updates species mid-battle in Showdown
+- Update the entity's appearance in-game
+
+### Mega Evolution
+- Check player has mega item (e.g. mega ring in offhand)
+- Check Pokemon holds correct mega stone
+- Append `mega` to move choice string
+- Handle `|-mega|` protocol message to update entity appearance
+
+### Other Forme Changes
+Handle `|detailschange|` (permanent, like evolution) and `|-formechange|` (temporary, like Aegislash) by updating entity model/skin.
+
+---
+
+## 12. Weather and Field Sync
+
+- Sync Minecraft dimension weather to Showdown at battle start (rain → Rain Dance, thunder → Primordial Sea, etc.)
+- Handle `|-weather|` messages to update battle weather state
+- Handle `|-fieldstart|` / `|-fieldend|` for Trick Room, Gravity, terrains
+- Optionally spawn particles at battle center based on active weather/field
+
+---
+
+## 13. Error Handling Patterns
+
+- Wrap stream interpretation in try/catch — log errors but don't crash the battle
+- Handle `|error|` from sideupdate — show retry form to player, or auto-pass
+- If actor entity becomes invalid (player disconnects, entity despawns) — force end battle
+- If team packing fails — log error and end battle gracefully
+- Set a maximum battle duration timeout as safety net
+
+---
+
+## 14. Implementation Principles
+
+- **Showdown is the source of truth** — Never calculate damage, type effectiveness, or battle mechanics yourself. Let Showdown handle it. Your code only interprets the results.
+- **Decouple display from logic** — Protocol interpretation and UI display should be separate concerns.
+- **Queue-based log display** — Don't show all messages instantly. Use timed queue for natural battle pacing (~1s per message).
+- **Delayed AI responses** — AI actors should wait 2-4 seconds before responding to simulate "thinking" and prevent instant turns.
+- **Track participation** — Know which Pokemon fought which opponents for accurate EXP/EV distribution.
+- **Graceful cleanup** — Always destroy streams, clear intervals, remove listeners, and clean up entity references when battle ends.
