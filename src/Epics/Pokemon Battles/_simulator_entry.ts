@@ -7,7 +7,7 @@ import {
     RandomPlayerAI,
     Teams,
     Dex,
-    toID,
+    toID
 } from '@pkmn/sim';
 //what the fuck is ts bru :???????: 😂😂😂😂😂👌
 //aex wr4th the fucking goat gg 
