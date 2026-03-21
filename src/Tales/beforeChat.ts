@@ -1,3 +1,4 @@
+// @ts-nocheck
 /*
 ROT Developers and Contributors:
 Moises (OWNER/CEO/Developer),

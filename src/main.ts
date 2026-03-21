@@ -1,5 +1,4 @@
-
-console.warn('IMPORTED MAIN')
+console.warn('Imported main file')
 import { Player, system, world} from '@minecraft/server';
 import { sleep } from './Papers/Paragraphs/ExtrasParagraphs.js';
 import { updateLang } from './Papers/LangPaper.js';
@@ -69,10 +68,11 @@ import './Epics/howToPlay/howToPlayMain.js'
 import './Epics/Outbreaks/Main.js'
 import './Epics/Event Pokemon/main.js'
 import './Epics/TeamGyms/main.js'
-
-
 // Listen for the scriptevent trigger
 system.afterEvents.scriptEventReceive.subscribe(event => {
+    if (event.id === "aex:menu"){
+        
+    }
     if (event.id !== "remove:str_scores") return;
 
     const source = event.sourceEntity;

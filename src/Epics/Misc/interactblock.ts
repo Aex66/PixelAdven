@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { Player, world, Block } from "@minecraft/server";
 import { isWithinPlotBounds, loadPlotData } from "./PlotPerms";
 

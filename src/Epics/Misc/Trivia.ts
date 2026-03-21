@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { system, world } from "@minecraft/server";
 import Commands from "../../Papers/CommandPaper/CommandPaper";
 

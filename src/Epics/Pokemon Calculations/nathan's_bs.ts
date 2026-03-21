@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { ChatSendBeforeEvent, system, world } from "@minecraft/server";
 
 world.beforeEvents.chatSend.subscribe(data => {

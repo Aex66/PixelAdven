@@ -15,9 +15,11 @@ export function math(entity: Entity, player: Player) {
     if (!player || !player.isValid) return;
 
     let highestLevel = 1;
-    for (let i = 0; i < 6; i++) {
-        const level = getScore(player, `poke${i > 0 ? i + 1 : ''}Lvl`) ?? 0;
-        if (level > highestLevel) highestLevel = level;
+    const team = Object.values(selected?.[player.name] ?? {}).map(p => p[2]?.level ?? 0);
+    if (team) {
+        if (team.length > 0) {
+            highestLevel = Math.max(...team);
+        }
     }
 
     entity.addTag("math");
@@ -48,15 +50,12 @@ export function math(entity: Entity, player: Player) {
 
     // Generate level
     calculations.Lvl = Math.floor(Math.random() * (maxLevel - minLevel + 1)) + minLevel;
-
     entity.runCommand(`scoreboard players set @s "Lvl" ${calculations.Lvl}`);
 
     calculations.DMax = ~~(Math.random() * ((wildPokemon[entity.typeId]?.DMax?.[1] ?? 1) - (wildPokemon[entity.typeId]?.DMax?.[0] ?? 0))) + (wildPokemon[entity.typeId]?.DMax?.[0] ?? 0);
-
     entity.runCommand(`scoreboard players set @s "DMax" ${calculations.DMax}`);
 
     calculations.Terra = ~~(Math.random() * ((wildPokemon[entity.typeId]?.Terra?.[1] ?? 1) - (wildPokemon[entity.typeId]?.Terra?.[0] ?? 0))) + (wildPokemon[entity.typeId]?.Terra?.[0] ?? 0);
-
     entity.runCommand(`scoreboard players set @s "terra" ${calculations.Terra}`);
 
     keys.forEach(k => {
@@ -233,4 +232,5 @@ import './SetSize.js'
 import './megaAscend.js'
 import { getScore } from "../Pokemon Battles/utils.js";
 import AbilityList from "../../Letters/pokemon/Abilities.js";
+import { selected } from "../Main/Forms/PC/main.js";
 

@@ -23,9 +23,10 @@ import { writePokemon } from "../Pokemon Database/main.js";
 import { selected } from "../Main/Forms/PC/main.js";
 import { checkExperience } from "./leveling.js";
 import { deployed } from "./main.js";
-import { StatusEffectsValues } from "../../Letters/pokemon/moves.js";
+import { MOVE_KEYS, StatusEffectsValues } from "../../Letters/pokemon/moves.js";
+import pokemoneNatures from "../../Letters/pokemon/natures.js";
+import AbilityList from "../../Letters/pokemon/Abilities.js";
 import { ballTags } from "./catch.js";
-import { battles } from "../Pokemon Battles/classes/Battle.js";
 system.runInterval(() => {
     const overworld = world.getDimension('minecraft:overworld');
 
@@ -48,24 +49,22 @@ system.runInterval(() => {
             continue;
         }
 
-        player.sendMessage(`§c${grammarText(selected[player.name][deployed[player.name][1]][1])} has fainted!`);
+        //player.sendMessage(`§c${grammarText(selected[player.name][deployed[player.name][1]][1])} has fainted!`);
         spawnPokemon(player, selected[player.name][deployed[player.name][1]], deployed[player.name][1], true);
-
-        const hpKeys = ["pokeHP", "poke2HP", "poke3HP", "poke4HP", "poke5HP", "poke6HP"];
-        const allDead = hpKeys.every(key => {
-            const score = world.scoreboard.getObjective(key)?.getScore(player) ?? 0;
-            return score <= 0;
-        });
-
-        if (allDead) {
-            player.sendMessage("§4All your Pokémon have fainted! The battle is over.");
-            if (player.hasTag('next')) player.removeTag('next')
-
-            const battle = battles.get(player.id);
-            if (battle) battle.end();
-        }
     }
 }, 20);
+
+export function getScore(entity: Entity, objective: string): number | undefined {
+    try {
+        const obj = world.scoreboard.getObjective(objective);
+        if (!obj) return undefined;
+        const identity = entity.scoreboardIdentity;
+        if (!identity) return undefined;
+        return obj.getScore(identity);
+    } catch {
+        return undefined;
+    }
+}
 
 /**
  * Spawn a pokemon
@@ -76,6 +75,65 @@ system.runInterval(() => {
  * @param {Battle} battleInstance Optional battle instance for defeated trigger
  * @returns 
  */
+/** Read all battle-relevant stats from a wild Pokemon entity's scoreboard */
+export function collectEntityStats(entity: Entity): any {
+    const get = (id: string) => getScore(entity, id);
+
+    const resolveMoveId = (id: number | undefined): string => {
+        if (id == null || id <= 0) return '';
+        return MOVE_KEYS[id] ?? '';
+    };
+
+    const natureIdx  = get('nature')  ?? 0;
+    const abilityIdx = get('ability') ?? 0;
+    const genderIdx  = get('Gender')  ?? 0;
+    const GENDERS    = ['', 'M', 'F'] as const;
+
+    return {
+        level:                get('Lvl'),
+        Experience:           get('Ex'),
+        Base_Health:          get('HP_Base'),
+        Current_Health:       get('HP_Low') ?? get('HP_Base'),
+        Base_attack:          get('Atk_Base'),
+        Base_defense:         get('Def_Base'),
+        Base_speed:           get('Spd_Base'),
+        Base_special_attack:  get('Sp_Atk_Base'),
+        Base_special_defense: get('Sp_Def_Base'),
+        IV_health:            get('IV_HP'),
+        IV_attack:            get('IV_Atk'),
+        IV_defense:           get('IV_Def'),
+        IV_special_attack:    get('IV_Sp_Atk'),
+        IV_special_defense:   get('IV_Sp_Def'),
+        IV_speed:             get('IV_Spd'),
+        EV_health:            get('EV_HP'),
+        EV_attack:            get('EV_Atk'),
+        EV_defense:           get('EV_Def'),
+        EV_special_attack:    get('EV_Sp_Atk'),
+        EV_special_defense:   get('EV_Sp_Def'),
+        EV_speed:             get('EV_Spd'),
+        DMax:                 get('DMax'),
+        Terra:                get('terra'),
+        Nature:               (pokemoneNatures.values[natureIdx]?.[2] as string) ?? 'Serious',
+        Ability:              AbilityList[abilityIdx] ?? '',
+        Variant:              get('Variant'),
+        Gender:               GENDERS[genderIdx] ?? '',
+        Traded:               get('Traded') === 1,
+        Evolution_index:      get('Evolution_index'),
+        heldItem:             get('heldItem'),
+        friendShipLevel:      get('friendShipLevel'),
+        pokeBall:             get('pokeBall'),
+        condition:            get('condition'),
+        Move1:                resolveMoveId(get('move1')),
+        Move2:                resolveMoveId(get('move2')),
+        Move3:                resolveMoveId(get('move3')),
+        Move4:                resolveMoveId(get('move4')),
+        Move1_PP:             get('move1pp'),
+        Move2_PP:             get('move2pp'),
+        Move3_PP:             get('move3pp'),
+        Move4_PP:             get('move4pp'),
+    };
+}
+
 export async function spawnPokemon(player: Player, member: [id: number, name: string, data: longHand], index?: number, despawn?: boolean, onSpawn?: (entity: Entity) => void) {
     if (!despawn && (member[2]?.Current_Health ?? member[2].Base_Health) < 1) {
         player.sendMessage(`You cannot summon ${member[1]} because it's health is 0!`)

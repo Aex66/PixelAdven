@@ -2,9 +2,6 @@ import { world, Player, ItemStack } from "@minecraft/server";
 import { ActionFormData } from "@minecraft/server-ui";
 import { readPokemon } from "../../Pokemon Database/main";
 import { grammarText } from "../../../Papers/Paragraphs/ExtrasParagraphs";
-import { Battle } from "../../Pokemon Battles/classes/Battle";
-import { PlayerBattler, WildBattler } from "../../Pokemon Battles/classes/Battler";
-import { Pokemon } from "../../Pokemon Battles/classes/Pokemon";
 import { math } from "../../Pokemon Calculations/main";
 import { progressLegendaryCatch } from "./legendaryQuestUtils";
 
@@ -316,20 +313,13 @@ function handleRaikouShrine(player: Player) {
       let direction = player.getViewDirection();
       player.applyKnockback({ x: direction.x * -2, z: direction.z * -2 }, 0.5);
 
-      const playerBattler = new PlayerBattler(player);
-      const wildPokemon = new WildBattler(entity);
-      wildPokemon.pokemon = new Pokemon(entity, wildPokemon);
-
-      const battle = new Battle(playerBattler, wildPokemon);
-
       player.addTag('next');
       player.addTag('battle');
       player.runCommand('title @s actionbar 0');
       entity.addTag("battle");
       entity.addEffect('slowness', 999999, { amplifier: 255, showParticles: false });
 
-      battle.start();
-
+      // TODO: Use new battle api
       player.sendMessage("§eRaikou roars from the storm...");
     } else {
       player.sendMessage("§cYou must have a Static Orb to summon Raikou.");

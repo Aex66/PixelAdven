@@ -3,3 +3,4 @@
 *.js
 src/Letters/pokemon/wild.ts
 scripts/Letters/pokemon/wild.js
+/node_modules

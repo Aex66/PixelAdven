@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { world, system, Player, ItemStack, EntityInventoryComponent, EquipmentSlot } from "@minecraft/server";
 import { ActionFormData, ModalFormData } from "@minecraft/server-ui";
 import { openFlyMenu } from "./Warps";

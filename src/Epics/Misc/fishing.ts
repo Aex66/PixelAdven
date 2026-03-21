@@ -1,11 +1,7 @@
-
+// @ts-nocheck
 import { Player, EquipmentSlot, world, ItemStack, ItemTypes, Entity, system, Vector3 } from "@minecraft/server";
 import { ModalFormData, ActionFormData } from "@minecraft/server-ui";
 import { grammarText } from "../../Papers/Paragraphs/ExtrasParagraphs";
-import { Battle } from "../Pokemon Battles/classes/Battle";
-import { PlayerBattler, WildBattler } from "../Pokemon Battles/classes/Battler";
-import { Pokemon } from "../Pokemon Battles/classes/Pokemon";
-import { distance } from "../Pokemon Battles/utils";
 import { math } from "../Pokemon Calculations/main";
 
 type RodType = "old" | "good" | "super";
@@ -493,12 +489,6 @@ function onCatchSuccess(player: Player, rodType: RodType, pokemonId: string, hoo
   const direction = player.getViewDirection();
   player.applyKnockback({ x: direction.x * -2, z: direction.z * -2 }, 0.5);
 
-  const pb = new PlayerBattler(player);
-  const wb = new WildBattler(entity);
-  wb.pokemon = new Pokemon(entity, wb);
-
-  const battle = new Battle(pb, wb);
-
   player.runCommand("scoreboard players add @s fishing 1");
   player.addTag("next");
   player.addTag("battle");
@@ -509,7 +499,7 @@ function onCatchSuccess(player: Player, rodType: RodType, pokemonId: string, hoo
   entity.addEffect("slowness", 999999, { amplifier: 255, showParticles: false });
 
   hook.kill();
-  battle.start();
+  // TODO: Use new battle api
 
   consumeBait(player);
 

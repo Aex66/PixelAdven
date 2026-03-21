@@ -13,6 +13,7 @@ import { openFlyMenu } from "./Warps";
 import { openBattleMenu } from "../Pokemon Battles/command";
 import { openQuestMenu } from "../Main Quests/questMain";
 import { openConfigMenu } from "./configMenu";
+import { BATTLES } from "../Pokemon Battles/classes/Battle";
 
 export function showBiome(player: Player) {
     // Same biome list used by the /biome command
@@ -152,7 +153,7 @@ world.afterEvents.itemUse.subscribe(event => {
     const equipment = player.getComponent("equippable");
     const handItem = equipment?.getEquipment(EquipmentSlot.Mainhand);
 
-    if (handItem?.typeId === "pokeworld:pokedex" && !player.hasTag("battle")&& !player.hasTag("on_plot")) {
+    if (handItem?.typeId === "pokeworld:pokedex" && !Array.from(BATTLES.values()).some(battle => battle.entityInBattle(player)) && !player.hasTag("on_plot")) {
         openMenu(player);
     }
 });

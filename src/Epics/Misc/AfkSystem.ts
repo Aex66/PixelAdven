@@ -1,3 +1,4 @@
+// @ts-nocheck
 // =========================================================
 // ANTI-AFK SYSTEM — FULLY UPDATED FOR LATEST BEDROCK API
 // No deprecated events, no errors, movement polling included

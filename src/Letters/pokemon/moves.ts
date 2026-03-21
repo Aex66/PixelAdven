@@ -15406,4 +15406,5 @@ const pokemonMoves = {
     "name": "Zippy Zap"
   }
 } as unknown as { [move: string]: Pokemon.Move };
+export const MOVE_KEYS = Object.keys(pokemonMoves);
 export default pokemonMoves;

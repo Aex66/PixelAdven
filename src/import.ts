@@ -1,6 +1,8 @@
 import "./Epics/Misc/radarCommand.js";
-import { world } from "@minecraft/server"
+import { system } from "@minecraft/server"
 
-world.afterEvents.worldLoad.subscribe(() => {
-    import("./main.js");
-  })
+system.run(() => {
+  import("./main.js");
+})
+
+//hi
