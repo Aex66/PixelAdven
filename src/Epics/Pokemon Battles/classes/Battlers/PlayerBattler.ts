@@ -6,10 +6,10 @@
  *  - Spawns the player's active Pokemon as in-world entities for camera targeting.
  *  - Stops battle music and removes spawned Pokemon entities on battle end.
  */
-import { Player as IPlayer } from '@minecraft/server';
+import { Entity, Player as IPlayer } from '@minecraft/server';
 import { Battler, SlotKey } from './Battler.js';
-import { PlayerBattleHandler } from './PlayerBattleHandler.js';
-import { spawnPokemon } from '../../Pokemon Calculations/spawn.js';
+import { PlayerBattleHandler } from '../PlayerBattleHandler.js';
+import { spawnPokemon } from '../../../Pokemon Calculations/spawn.js';
 
 export class PlayerBattler extends Battler {
     readonly kind = 'player' as const;
@@ -66,9 +66,9 @@ export class PlayerBattler extends Battler {
         this.handler?.setFormHold(ticks);
     }
 
-    override ownsEntity(entity: any): boolean {
+    override ownsEntity(entity: Entity): boolean {
         // The player entity itself counts as part of this battler.
-        if ((this.player as any).id === entity.id) return true;
+        if (this.player.id === entity.id) return true;
         return super.ownsEntity(entity);
     }
 }

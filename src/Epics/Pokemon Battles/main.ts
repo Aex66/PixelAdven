@@ -25,7 +25,6 @@ world.afterEvents.entityHitEntity.subscribe(async ({ damagingEntity, hitEntity }
     if (typeId.startsWith('pokeworld:wild_')) {
         if (Array.from(BATTLES.values()).some(b => b.entityInBattle(hitEntity))) return;
         const team = getPlayerTeamFromSelected(selected, player.name);
-        if (!team) return player.sendMessage('§cYou have no Pokemon to battle with!');
         math(hitEntity, player);
         hitEntity.addEffect('slowness', 999999, { amplifier: 255, showParticles: false });
         system.runTimeout(() => Battle.startWild(player, hitEntity, team), 5);
@@ -38,7 +37,6 @@ world.afterEvents.entityHitEntity.subscribe(async ({ damagingEntity, hitEntity }
             b.entityInBattle(player as any) || b.entityInBattle(hitEntity)
         )) return;
         const team = getPlayerTeamFromSelected(selected, player.name);
-        if (!team) return player.sendMessage('§cYou have no Pokemon to battle with!');
         hitEntity.addEffect('slowness', 999999, { amplifier: 255, showParticles: false });
         system.runTimeout(() => Battle.startTrainer(player, hitEntity, team), 5);
         return;
@@ -50,7 +48,6 @@ world.afterEvents.entityHitEntity.subscribe(async ({ damagingEntity, hitEntity }
             b.entityInBattle(player as any) || b.entityInBattle(hitEntity)
         )) return;
         const team = getPlayerTeamFromSelected(selected, player.name);
-        if (!team) return player.sendMessage('§cYou have no Pokemon to battle with!');
         hitEntity.addEffect('slowness', 999999, { amplifier: 255, showParticles: false });
         system.runTimeout(() => Battle.startGymLeader(player, hitEntity, team), 5);
         return;

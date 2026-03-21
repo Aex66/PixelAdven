@@ -9,8 +9,8 @@
  * until Step 5 implements actual trainer-party Pokemon spawning.
  */
 import { Entity } from '@minecraft/server';
-import { RandomPlayerAI } from '../simulator.js';
-import { StrongHeuristicsAI } from './StrongHeuristicsAI.js';
+import { RandomPlayerAI } from '../../simulator.js';
+import { StrongHeuristicsAI } from '../StrongHeuristicsAI.js';
 import { Battler, SlotKey } from './Battler.js';
 
 export class TrainerBattler extends Battler {
@@ -44,7 +44,7 @@ export class TrainerBattler extends Battler {
         const ai = this.difficulty > 0
             ? new StrongHeuristicsAI(playerStream, { difficulty: this.difficulty })
             : new RandomPlayerAI(playerStream);
-        (ai as any).start();
+        ai .start();
     }
 
     onSwitch(slot: SlotKey, _species: string): void {

@@ -6,9 +6,9 @@
  * for all decisions.
  */
 import { Entity } from '@minecraft/server';
-import { RandomPlayerAI } from '../simulator.js';
+import { RandomPlayerAI } from '../../simulator.js';
 import { Battler, SlotKey } from './Battler.js';
-import { collectEntityStats } from '../../Pokemon Calculations/spawn.js';
+import { collectEntityStats } from '../../../Pokemon Calculations/spawn.js';
 
 export class WildBattler extends Battler {
     readonly kind = 'wild' as const;
