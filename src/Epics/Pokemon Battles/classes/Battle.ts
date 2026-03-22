@@ -12,8 +12,8 @@
  */
 import { Player as IPlayer, Entity, system } from '@minecraft/server';
 import { BattleStreams } from '../simulator.js';
-import { BATTLE_FORMAT_ID } from '../formats.js';
-import { packLongHandToSet, packTeamForShowdown } from '../teamPacker.js';
+import { FORMAT_SINGLES, FORMAT_DOUBLES, GameType } from '../formats.js';
+import { packLongHandToSet } from '../teamPacker.js';
 import { setScore } from '../utils.js';
 import { longHand } from '../../Pokemon Database/@types/types.js';
 import pokemonMoves from '../../../Letters/pokemon/moves.js';
@@ -22,6 +22,7 @@ import { Battler, BattlerKind, SlotKey } from './Battlers/Battler.js';
 import { PlayerBattler } from './Battlers/PlayerBattler.js';
 import { WildBattler } from './Battlers/WildBattler.js';
 import { TrainerBattler } from './Battlers/TrainerBattler.js';
+import { FaintedEntry, BattleResult, getTrainerReward } from '../postBattle.js';
 
 export type { BattlerKind, SlotKey } from './Battlers/Battler.js';
 
@@ -45,6 +46,15 @@ const MOVE_TYPE_MAP = new Map<string, number>(
         .map(([name, data]) => [name.toLowerCase(), data.type])
 );
 
+// Lowercase move display-name → longHand move index (what Move1-Move4 stores).
+// Used to track PP decrements for all party Pokemon during the battle.
+const MOVE_NAME_TO_INDEX = new Map<string, number>(
+    Object.keys(pokemonMoves as Record<string, unknown>).map((name, i) => [name.toLowerCase(), i])
+);
+
+const MOVE_SLOTS  = ['Move1',    'Move2',    'Move3',    'Move4'   ] as const;
+const MOVE_PP_SLOTS = ['Move1_PP', 'Move2_PP', 'Move3_PP', 'Move4_PP'] as const;
+
 // ─── Timing constants ──────────────────────────────────────────────────────────
 
 const LOG_QUEUE_INTERVAL_TICKS = 20;           // 1 second per log line
@@ -58,10 +68,20 @@ export interface ArenaSession {
     readonly battlers: Map<'p1' | 'p2', Battler>;
     readonly spectators: Set<IPlayer>;
     readonly logQueue: LogEntry[];
+    readonly gameType: GameType;
     startTime: number;
     ended: boolean;
     winner: string | null;
     turn: number;
+    /** Recorded faint events used for EXP/EV distribution at battle end. */
+    faintedEntries: FaintedEntry[];
+    /**
+     * Tracks which Pokemon (by set.name = speciesId) have used a move per side.
+     * Used to determine which Pokemon participated for EXP split.
+     */
+    participantNames: Map<'p1' | 'p2', Set<string>>;
+    /** Money rewarded to the player if they beat a trainer. 0 otherwise. */
+    trainerReward: number;
     entityInBattle(entity: Entity): boolean;
     end(): void;
 }
@@ -112,7 +132,7 @@ function parseProtocolLine(line: string): { cmd: string; args: string[] } {
 }
 
 function cleanIdent(ident: string): string {
-    return ident.replace(/^p\da?: /i, '');
+    return ident.replace(/^p\d[a-z]?: /i, '');
 }
 
 function parseHP(condition: string): string {
@@ -193,6 +213,23 @@ function formatProtocolLine(line: string, p2Kind: BattlerKind = 'wild'): string 
             return `§e${cleanIdent(args[0] ?? '')}§r is holding §b${args[1] ?? '?'}§r!`;
         case '-ability':
             return `§e${cleanIdent(args[0] ?? '')}§r's ability: §b${args[1] ?? '?'}§r`;
+        case 'detailschange': {
+            // Permanent in-battle forme change (evolution, e.g. Cosplay Pikachu)
+            const species = (args[1] ?? '').split(',')[0].trim();
+            return `§e${cleanIdent(args[0] ?? '')}§r became §d${species}§r!`;
+        }
+        case '-formechange': {
+            // Temporary forme change (e.g. Aegislash Shield↔Blade, Shaymin Land↔Sky)
+            const forme = args[1] ?? '?';
+            return `§e${cleanIdent(args[0] ?? '')}§r changed forme: §b${forme}§r!`;
+        }
+        case '-mega': {
+            const mega = args[1] ?? cleanIdent(args[0] ?? '');
+            return `§d§l${cleanIdent(args[0] ?? '')} Mega Evolved into Mega ${mega}!§r`;
+        }
+        case '-primal': {
+            return `§5§l${cleanIdent(args[0] ?? '')} underwent Primal Reversion!§r`;
+        }
         case 'player': case 'teamsize': case 'gametype': case 'gen': case 'tier':
         case 'rule': case 'start': case 't:': case 'upkeep': case '-nothing':
         case 'clearpoke': case 'poke': case 'teampreview': case 'request': case '':
@@ -227,8 +264,16 @@ function syncEntityHP(entity: Entity | null, hpStr: string): void {
     if (!entity) return;
     try {
         if (!entity.isValid) return;
-        const match = hpStr.match(/^(\d+)/);
-        if (match) setScore(entity, 'HP_Low', parseInt(match[1], 10));
+        // Parse "current/max [status]" — also store HP_High for catch-rate calculations.
+        const match = hpStr.match(/^(\d+)(?:\/(\d+))?/);
+        if (match) {
+            setScore(entity, 'HP_Low', parseInt(match[1], 10));
+            if (match[2]) {
+                const maxHp = parseInt(match[2], 10);
+                // HP_High is the legacy name used by the catch system
+                setScore(entity, 'HP_High', maxHp);
+            }
+        }
     } catch { /* gone */ }
 }
 
@@ -296,6 +341,7 @@ export class Battle {
 
     // ── Factory methods ─────────────────────────────────────────────────────────
 
+    /** Wild encounters are always singles. */
     static startWild(
         player: IPlayer,
         wildEntity: Entity,
@@ -305,20 +351,29 @@ export class Battle {
             player.sendMessage('§cYou have no Pokemon to battle with!');
             return null;
         }
+        try {
+            if (!wildEntity.getTags().some(t => t.startsWith('ODW:'))) {
+                wildEntity.addTag(`ODW:${player.name}`);
+            }
+        } catch { /* entity may already be invalid */ }
+
         return Battle.createArena(
             new PlayerBattler(player, 'p1', playerTeam),
-            new WildBattler(wildEntity, 'p2')
+            new WildBattler(wildEntity, 'p2'),
+            'singles'
         );
     }
 
     /**
      * @param difficulty  0 = RandomPlayerAI, 1–5 = StrongHeuristicsAI (default 0)
+     * @param gameType    'singles' | 'doubles' (default 'doubles')
      */
     static startTrainer(
         player: IPlayer,
         trainerEntity: Entity,
         playerTeam: [number, string, any][] | null,
-        difficulty = 0
+        difficulty = 0,
+        gameType: GameType = 'doubles'
     ): ArenaSession | null {
         if (!playerTeam?.length) {
             player.sendMessage('§cYou have no Pokemon to battle with!');
@@ -334,19 +389,22 @@ export class Battle {
             new TrainerBattler(trainerEntity, 'trainer', 'p2', trainerTeam, {
                 despawnOnEnd: true,
                 difficulty,
-            })
+            }),
+            gameType
         );
     }
 
     /**
      * Gym leaders do not despawn on battle end.
      * @param difficulty  0 = RandomPlayerAI, 1–5 = StrongHeuristicsAI (default 3)
+     * @param gameType    'singles' | 'doubles' (default 'doubles')
      */
     static startGymLeader(
         player: IPlayer,
         gymLeaderEntity: Entity,
         playerTeam: [number, string, any][] | null,
-        difficulty = 3
+        difficulty = 3,
+        gameType: GameType = 'doubles'
     ): ArenaSession | null {
         if (!playerTeam?.length) {
             player.sendMessage('§cYou have no Pokemon to battle with!');
@@ -362,27 +420,33 @@ export class Battle {
             new TrainerBattler(gymLeaderEntity, 'gymleader', 'p2', leaderTeam, {
                 despawnOnEnd: false,
                 difficulty,
-            })
+            }),
+            gameType
         );
     }
 
+    /**
+     * @param gameType  'singles' | 'doubles' (default 'doubles')
+     */
     static startPvP(
         player1: IPlayer,
         player2: IPlayer,
         team1: [number, string, any][] | null,
-        team2: [number, string, any][] | null
+        team2: [number, string, any][] | null,
+        gameType: GameType = 'doubles'
     ): ArenaSession | null {
         if (!team1?.length) { player1.sendMessage('§cYou have no Pokemon to battle with!'); return null; }
         if (!team2?.length) { player2.sendMessage('§cYou have no Pokemon to battle with!'); return null; }
         return Battle.createArena(
             new PlayerBattler(player1, 'p1', team1),
-            new PlayerBattler(player2, 'p2', team2)
+            new PlayerBattler(player2, 'p2', team2),
+            gameType
         );
     }
 
     // ── Core arena factory ──────────────────────────────────────────────────────
 
-    private static createArena(p1: Battler, p2: Battler): ArenaSession | null {
+    private static createArena(p1: Battler, p2: Battler, gameType: GameType = 'singles'): ArenaSession | null {
         // Reject if any player battler is already in a battle.
         for (const battler of [p1, p2]) {
             if (battler instanceof PlayerBattler) {
@@ -396,16 +460,29 @@ export class Battle {
         const stream  = new BattleStreams.BattleStream();
         const streams = BattleStreams.getPlayerStreams(stream);
 
+        // Determine trainer reward up-front (0 if not a trainer battle).
+        const trainerBattler = [p1, p2].find(b => b instanceof TrainerBattler) as TrainerBattler | undefined;
+        const trainerReward  = trainerBattler
+            ? getTrainerReward(
+                trainerBattler.entity as any,
+                Math.max(...trainerBattler.team.map(([, , d]) => (d?.level ?? 1) as number))
+              )
+            : 0;
+
         const session: ArenaSession = {
-            id:         `arena_${Date.now()}_${p1.displayName}`,
+            id:               `arena_${Date.now()}_${p1.displayName}`,
             stream,
-            battlers:   new Map<'p1' | 'p2', Battler>([['p1', p1], ['p2', p2]]),
-            spectators: new Set(),
-            logQueue:   [],
-            startTime:  Date.now(),
-            ended:      false,
-            winner:     null,
-            turn:       0,
+            battlers:         new Map<'p1' | 'p2', Battler>([['p1', p1], ['p2', p2]]),
+            spectators:       new Set(),
+            logQueue:         [],
+            gameType,
+            startTime:        Date.now(),
+            ended:            false,
+            winner:           null,
+            turn:             0,
+            faintedEntries:   [],
+            participantNames: new Map([['p1', new Set()], ['p2', new Set()]]),
+            trainerReward,
 
             entityInBattle(entity: Entity): boolean {
                 for (const battler of this.battlers.values()) {
@@ -418,10 +495,15 @@ export class Battle {
                 if (this.ended) return;
                 this.ended = true;
                 BATTLES.delete(this.id);
-                // Each battler handles its own cleanup (music stop, entity removal,
-                // NPC despawn) via onEnd().
+
+                const result: BattleResult = {
+                    faintedEntries: this.faintedEntries,
+                    // Only award money to the winning player battler.
+                    trainerReward:  this.trainerReward,
+                };
+
                 for (const battler of this.battlers.values()) {
-                    battler.onEnd(this.winner);
+                    battler.onEnd(this.winner, result);
                 }
             },
         };
@@ -441,12 +523,13 @@ export class Battle {
         (async () => {
             try {
                 // ── Start the Showdown battle ──────────────────────────────────
-                streams.omniscient.write(`>start ${JSON.stringify({ formatid: BATTLE_FORMAT_ID })}\n`);
+                const formatid = gameType === 'doubles' ? FORMAT_DOUBLES : FORMAT_SINGLES;
+                streams.omniscient.write(`>start ${JSON.stringify({ formatid })}\n`);
                 streams.omniscient.write(
-                    `>player p1 ${JSON.stringify({ name: p1.displayName, team: packTeamForShowdown(p1PackedTeam) })}\n`
+                    `>player p1 ${JSON.stringify({ name: p1.displayName, team: p1PackedTeam })}\n`
                 );
                 streams.omniscient.write(
-                    `>player p2 ${JSON.stringify({ name: p2.displayName, team: packTeamForShowdown(p2PackedTeam) })}\n`
+                    `>player p2 ${JSON.stringify({ name: p2.displayName, team: p2PackedTeam })}\n`
                 );
 
                 // ── Wire battlers to their player streams ──────────────────────
@@ -457,6 +540,22 @@ export class Battle {
                 const onRun = () => streams.omniscient.write('>forcetie\n');
                 for (const [sideKey, battler] of session.battlers) {
                     battler.start(streamsBySide[sideKey as 'p1' | 'p2'], onRun);
+                }
+
+                // ── Catch context (wild battles only) ─────────────────────────
+                // Wire after start() so handler already exists.
+                if (p2 instanceof WildBattler && p1 instanceof PlayerBattler) {
+                    p1.configureCatch({
+                        getWildEntity: () => p2.entity?.isValid ? p2.entity : null,
+                        getTurn:       () => session.turn,
+                        onCaught:      () => {
+                            // The existing _catch function in Pokemon Calculations/catch.ts
+                            // already handles: party/PC assignment, messages, entity removal,
+                            // outbreak tracking, and quest progress.
+                            // We only need to end the Showdown battle session.
+                            streams.omniscient.write('>forcetie\n');
+                        },
+                    });
                 }
 
                 // ── Announce battle start ──────────────────────────────────────
@@ -500,6 +599,15 @@ export class Battle {
                                     const species = (args[1] ?? '').split(',')[0].trim().toLowerCase();
                                     battler.onSwitch(slot, species);
                                 }
+
+                                // Update foeActiveNames on opposing PlayerBattlers
+                                const oppSideId = sideId === 'p1' ? 'p2' : 'p1';
+                                const oppBattler = session.battlers.get(oppSideId);
+                                if (oppBattler instanceof PlayerBattler && oppBattler.handler) {
+                                    const displaySpecies = (args[1] ?? '').split(',')[0].trim();
+                                    const slotIndex = slot === 'a' ? 0 : 1;
+                                    oppBattler.handler.foeActiveNames[slotIndex] = displaySpecies || 'Foe';
+                                }
                             }
                         }
 
@@ -526,6 +634,58 @@ export class Battle {
                         }
                         if (cmd === '-end' && (args[1] ?? '').toLowerCase().includes('confusion')) {
                             syncEntityCondition(getActiveEntity(session.battlers, args[0] ?? ''), 0);
+                        }
+
+                        // ── Participation tracking + PP decrement on |move| ────
+                        if (cmd === 'move') {
+                            const attackerIdent = args[0] ?? '';
+                            const moveName      = args[1] ?? '';
+                            const sideMatch = attackerIdent.match(/^(p[12])/);
+                            if (sideMatch) {
+                                const attackerSide = sideMatch[1] as 'p1' | 'p2';
+                                // set.name = speciesId is the part after ": "
+                                const pokeName = attackerIdent.split(': ')[1] ?? '';
+                                if (pokeName) {
+                                    session.participantNames.get(attackerSide)?.add(pokeName);
+
+                                    // Decrement PP in longHand so benched Pokemon also get accurate PP
+                                    const battler   = session.battlers.get(attackerSide);
+                                    const teamEntry = battler?.team.find(([, sp]) => sp === pokeName);
+                                    if (teamEntry && moveName) {
+                                        const mon      = teamEntry[2] as any;
+                                        const moveIdx  = MOVE_NAME_TO_INDEX.get(moveName.toLowerCase()) ?? -1;
+                                        if (moveIdx >= 0) {
+                                            for (let m = 0; m < 4; m++) {
+                                                if (mon[MOVE_SLOTS[m]] === moveIdx) {
+                                                    mon[MOVE_PP_SLOTS[m]] = Math.max(0, (mon[MOVE_PP_SLOTS[m]] ?? 0) - 1);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // ── Faint tracking (for EXP rewards) ─────────────────
+                        if (cmd === 'faint') {
+                            const faintedIdent = args[0] ?? ''; // "p2a: pokeworld:wild_pikachu"
+                            const faintedSideMatch = faintedIdent.match(/^(p[12])/);
+                            if (faintedSideMatch) {
+                                const faintedSide  = faintedSideMatch[1] as 'p1' | 'p2';
+                                const winnerSide   = faintedSide === 'p1' ? 'p2' : 'p1';
+                                const faintedName  = faintedIdent.split(': ')[1] ?? '';
+                                const faintedBattler = session.battlers.get(faintedSide);
+                                const faintedEntry = faintedBattler?.team.find(([, sp]) => sp === faintedName);
+                                if (faintedEntry) {
+                                    session.faintedEntries.push({
+                                        species:        faintedEntry[1],
+                                        level:          (faintedEntry[2] as any)?.level ?? 5,
+                                        attackerNames:  new Set(session.participantNames.get(winnerSide) ?? []),
+                                        attackerSideId: winnerSide,
+                                    });
+                                }
+                            }
                         }
 
                         // ── Camera animation + attack particle on |move| ───────
@@ -643,6 +803,27 @@ export function getBattleSessionForPlayer(playerName: string): ArenaSession | nu
 
 export function getBattleForCatch(playerName: string): { turn: number } {
     return { turn: getBattleSessionForPlayer(playerName)?.turn ?? 0 };
+}
+
+/**
+ * Add a player as a spectator to an existing battle.
+ * Spectators receive all log messages but cannot send commands.
+ * Returns false if the session is already ended or the player is already a battler/spectator.
+ */
+export function addSpectator(session: ArenaSession, player: IPlayer): boolean {
+    if (session.ended) return false;
+    if (session.entityInBattle(player as any)) return false;
+    if (session.spectators.has(player)) return false;
+    session.spectators.add(player);
+    player.sendMessage(`§7[Spectating battle ${session.id.slice(-6)}]`);
+    return true;
+}
+
+/**
+ * Remove a spectator from a battle session.
+ */
+export function removeSpectator(session: ArenaSession, player: IPlayer): boolean {
+    return session.spectators.delete(player);
 }
 
 export function getPlayerTeamFromSelected(

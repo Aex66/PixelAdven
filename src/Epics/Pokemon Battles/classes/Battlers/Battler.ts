@@ -10,6 +10,7 @@
  * to these classes via the abstract interface below.
  */
 import { Entity } from '@minecraft/server';
+import { BattleResult } from '../../postBattle.js';
 
 export type BattlerKind = 'player' | 'wild' | 'trainer' | 'gymleader';
 export type SlotKey = 'a' | 'b';
@@ -56,9 +57,9 @@ export abstract class Battler {
     /**
      * Called when the battle is fully over.
      * Handle win/lose messages, despawning NPCs, stopping music,
-     * removing in-world Pokemon entities, etc.
+     * removing in-world Pokemon entities, EXP distribution, state sync, etc.
      */
-    abstract onEnd(winnerName: string | null): void;
+    abstract onEnd(winnerName: string | null, result?: BattleResult): void;
 
     /**
      * Delay the battle form for this battler by the given number of ticks from now.

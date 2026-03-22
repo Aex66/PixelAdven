@@ -44,7 +44,7 @@ export class TrainerBattler extends Battler {
         const ai = this.difficulty > 0
             ? new StrongHeuristicsAI(playerStream, { difficulty: this.difficulty })
             : new RandomPlayerAI(playerStream);
-        ai .start();
+        ai.start();
     }
 
     onSwitch(slot: SlotKey, _species: string): void {
@@ -55,7 +55,7 @@ export class TrainerBattler extends Battler {
         try { this.entity.addTag('battle'); } catch { /* ignore */ }
     }
 
-    onEnd(_winnerName: string | null): void {
+    onEnd(_winnerName: string | null, _result?: import('../../postBattle.js').BattleResult): void {
         for (const ent of this.activePokemon.values()) {
             if (!ent?.isValid) continue;
             try { ent.removeTag('battle'); } catch { /* ignore */ }

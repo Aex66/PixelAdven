@@ -25,8 +25,12 @@ import pokemonList from "../../Letters/pokemon/list.js";
 import { grammarText } from "../../Papers/Paragraphs/ExtrasParagraphs";
 import { longHand, pokeballs } from "../Pokemon Database/@types/types.js";
 import { ActionFormData } from "@minecraft/server-ui";
-import { Battle } from "../Pokemon Battles/classes/Battle.js";
 import TypeList from "../../Letters/pokemon/TypeList.js";
+
+/** Minimal battle context needed by the catch system. */
+export interface CatchBattleContext {
+    turn: number;
+}
 import { activeOutbreaks, endOutbreak, handleOutbreakProgress, spawnOutbreakEntity } from "../Outbreaks/outbreakManager.js";
 import { findNextFreePCSlotForPlayer } from "../Pokemon Database/PcControls.js";
 
@@ -48,7 +52,7 @@ const statusTags = {
 
 export const ballTags: Record<string, {
     multiplier: number;
-    conditionalMultiplier?: (entity: Entity, tags: string[], battle?: Battle, turn?: number) => number;
+    conditionalMultiplier?: (entity: Entity, tags: string[], battle?: CatchBattleContext, turn?: number) => number;
 }> = {
 
     empty: { multiplier: 1 },
@@ -169,7 +173,7 @@ function catchEffects(entity: Entity, pokeball: string | undefined) {
     if (pokeball) entity.triggerEvent(`pokeworld:${pokeball}`);
 }
 
-export async function _catch(entity: Entity, battle: Battle): Promise<"NO_PLAYER" | "POKEMON_BROKEFREE" | "POKEMON_CAUGHT"> {
+export async function _catch(entity: Entity, battle: CatchBattleContext): Promise<"NO_PLAYER" | "POKEMON_BROKEFREE" | "POKEMON_CAUGHT"> {
     const turn = battle.turn;
     const tags = entity.getTags();
     const hasHealBall = tags.includes("healball");

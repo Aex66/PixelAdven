@@ -10,7 +10,7 @@
     "@minecraft/server-ui": "^2.1.0-beta.1.26.0-stable"
   },
   "devDependencies": {
-    "@pkmn/sim": "^0.10.7",
+    "@pkmn/sim": "file:../underground-showdown/sim",
     "concurrently": "^9.2.1",
     "esbuild": "^0.27.3"
   }

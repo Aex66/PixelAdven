@@ -35,12 +35,15 @@ export class WildBattler extends Battler {
         try { this.entity.addTag('battle'); } catch { /* already tagged or gone */ }
     }
 
-    onEnd(_winnerName: string | null): void {
+    onEnd(_winnerName: string | null, _result?: import('../../postBattle.js').BattleResult): void {
         for (const ent of this.activePokemon.values()) {
             if (!ent?.isValid) continue;
             try { ent.removeTag('battle'); } catch { /* ignore */ }
         }
         this.activePokemon.clear();
+
+        // Despawn the wild entity regardless of win/lose/tie/catch.
+        try { if (this.entity?.isValid) this.entity.remove(); } catch { /* already gone */ }
     }
 
     override ownsEntity(entity: Entity): boolean {
