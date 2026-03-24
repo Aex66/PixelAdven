@@ -1,0 +1,1 @@
+effect @e[family=pokemon] regeneration infinite 255 true

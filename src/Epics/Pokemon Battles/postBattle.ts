@@ -1,5 +1,5 @@
 /**
- * Post-battle processing — state sync, EXP/EV distribution, level-up, summary.
+ * Post-battle processing — state sync, summary, trainer reward helpers.
  *
  * Called from PlayerBattler.onEnd after every battle.
  * Never imports from Battle.ts to avoid circular dependencies.
@@ -9,7 +9,6 @@ import { ActionFormData } from '@minecraft/server-ui';
 import { longHand } from '../Pokemon Database/@types/types.js';
 import { writePokemon } from '../Pokemon Database/main.js';
 import { checkExperienceForTeam } from '../Pokemon Calculations/levelingTeam.js';
-import wildPokemon from '../../Letters/pokemon/wild.js';
 import { StatusEffectsValues } from '../../Letters/pokemon/moves.js';
 
 // ─── Shared types ──────────────────────────────────────────────────────────────
@@ -21,7 +20,7 @@ import { StatusEffectsValues } from '../../Letters/pokemon/moves.js';
 export interface SyncableRequest {
     side: {
         pokemon: Array<{
-            ident:    string;  // "p1: pokeworld:wild_pikachu"
+            ident:    string;  // "p1a: Pikachu"
             details:  string;  // "Pikachu, L25, M"
             condition: string; // "89/267 par" | "0 fnt"
             active:   boolean;
@@ -34,24 +33,9 @@ export interface SyncableRequest {
 }
 
 /**
- * Data recorded when a Pokemon faints during the battle.
- * Used to calculate EXP and EV yields for the winning side.
- */
-export interface FaintedEntry {
-    /** Full typeId of the fainted Pokemon, e.g. "pokeworld:wild_pikachu" */
-    species: string;
-    level:   number;
-    /** set.name values (= speciesId) of the winning side's Pokemon that participated */
-    attackerNames: Set<string>;
-    /** Which side (p1/p2) the winning attackers belong to */
-    attackerSideId: 'p1' | 'p2';
-}
-
-/**
  * Data passed from Battle.ts to each battler's onEnd().
  */
 export interface BattleResult {
-    faintedEntries: FaintedEntry[];
     /** Money awarded to the player if they beat a trainer (0 if not applicable) */
     trainerReward: number;
 }
@@ -140,85 +124,7 @@ export function syncPokemonState(
     }
 }
 
-// ─── EV key mapping ────────────────────────────────────────────────────────────
-
-// wild.ts Base_EV key → longHand EV property
-const BASE_EV_TO_LONGHAND: Record<string, keyof longHand> = {
-    EV_HP:    'EV_health',
-    EV_Atk:   'EV_attack',
-    EV_Def:   'EV_defense',
-    EV_Sp_Atk:'EV_special_attack',
-    EV_Sp_Def:'EV_special_defense',
-    EV_Spd:   'EV_speed',
-};
-
-const EV_STAT_KEYS: (keyof longHand)[] = [
-    'EV_health', 'EV_attack', 'EV_defense',
-    'EV_special_attack', 'EV_special_defense', 'EV_speed',
-];
-
-// ─── 6b: EXP & EV distribution ────────────────────────────────────────────────
-
-/**
- * Distributes EXP and EVs to the winning side's participating Pokemon.
- *
- * Participation is tracked by `set.name` (= the speciesId we passed to Showdown),
- * which appears in the |move| event as "p1a: pokeworld:wild_pikachu".
- * We match these back to team entries by comparing team[i][1] === pokeName.
- *
- * Returns a map of team-slot-index → EXP gained (for summary display).
- *
- * This uses an Exp-Share-like model: every participating Pokemon gets
- * (Base_Exp × fainted_level / 5 / num_participants) EXP.
- */
-export function distributeExpAndEv(
-    team:          [number, string, any][],
-    faintedEntry:  FaintedEntry
-): Map<number, number> {
-    const expGainMap = new Map<number, number>();
-    const { species, level, attackerNames } = faintedEntry;
-
-    if (attackerNames.size === 0) return expGainMap;
-
-    const wildData = wildPokemon[species];
-    const baseExp  = wildData?.Base_Exp ?? 50;
-    const evYields = (wildData?.Base_EV ?? []) as [string, number][];
-
-    const numParticipants    = attackerNames.size;
-    const expPerParticipant  = Math.max(1, Math.floor(baseExp * level / 5 / numParticipants));
-
-    for (const pokeName of attackerNames) {
-        const teamIdx = team.findIndex(([, sp]) => sp === pokeName);
-        if (teamIdx < 0) continue;
-
-        const mon = team[teamIdx][2] as longHand;
-        if ((mon.Current_Health ?? 0) <= 0) continue; // Fainted participants get no EXP
-
-        // EXP
-        mon.Experience = (mon.Experience ?? 0) + expPerParticipant;
-        expGainMap.set(teamIdx, expPerParticipant);
-
-        // EVs (cap per stat: 252, total: 510)
-        const totalEvs = EV_STAT_KEYS.reduce((sum, k) => sum + ((mon[k] as number) ?? 0), 0);
-        let evBudget   = Math.max(0, 510 - totalEvs);
-
-        for (const [evKey, evAmount] of evYields) {
-            if (evBudget <= 0) break;
-            const lhKey = BASE_EV_TO_LONGHAND[evKey];
-            if (!lhKey) continue;
-            const current = ((mon[lhKey] as number) ?? 0);
-            const gain    = Math.min(252 - current, evBudget, evAmount);
-            if (gain > 0) {
-                (mon as any)[lhKey] = current + gain;
-                evBudget -= gain;
-            }
-        }
-    }
-
-    return expGainMap;
-}
-
-// ─── 6d: Battle summary screen ────────────────────────────────────────────────
+// ─── 6b: Battle summary screen ────────────────────────────────────────────────
 
 /**
  * Shows the post-battle summary form to the player.

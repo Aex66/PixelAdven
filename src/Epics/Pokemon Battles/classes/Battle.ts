@@ -10,59 +10,37 @@
  * This file only contains orchestration logic.
  * All battler-specific behaviour lives in the respective class.
  */
-import { Player as IPlayer, Entity, system } from '@minecraft/server';
+import { Player as IPlayer, Entity, system, RawMessage } from '@minecraft/server';
 import { BattleStreams } from '../simulator.js';
 import { FORMAT_SINGLES, FORMAT_DOUBLES, GameType } from '../formats.js';
 import { packLongHandToSet } from '../teamPacker.js';
-import { setScore } from '../utils.js';
 import { longHand } from '../../Pokemon Database/@types/types.js';
-import pokemonMoves from '../../../Letters/pokemon/moves.js';
-import TypeList from '../../../Letters/pokemon/TypeList.js';
 import { Battler, BattlerKind, SlotKey } from './Battlers/Battler.js';
 import { PlayerBattler } from './Battlers/PlayerBattler.js';
 import { WildBattler } from './Battlers/WildBattler.js';
 import { TrainerBattler } from './Battlers/TrainerBattler.js';
-import { FaintedEntry, BattleResult, getTrainerReward } from '../postBattle.js';
+import { BattleResult, getTrainerReward } from '../postBattle.js';
+import {
+    ArenaLayout, computeArenaPositions, playIntroCameraAnimation,
+} from '../battleArena.js';
+import '../handlers/registerHandlers.js';
+import { resetMoveVfxSessionState, type MoveVfxJob } from '../battleEffects.js';
+import { parseProtocolLine } from '../protocol.js';
+import { ShowdownInterpreter } from '../showdownInterpreter.js';
+import { interpret } from '../chunkInterpreter.js';
 
 export type { BattlerKind, SlotKey } from './Battlers/Battler.js';
-
-// ─── Visual constants ──────────────────────────────────────────────────────────
-
-const ATTACK_PARTICLES: Record<string, string> = {
-    None: '', Fire: 'pokeworld:fire_attack', Water: 'pokeworld:water_attack',
-    Normal: '', Electric: 'pokeworld:electric_attack', Grass: 'pokeworld:grass_attack',
-    Ground: 'pokeworld:ground_attack', Rock: 'pokeworld:rock_attack',
-    Ice: 'pokeworld:ice_attack', Fighting: 'pokeworld:fighting_attack',
-    Poison: 'pokeworld:poison_attack', Ghost: 'pokeworld:ghost_attack',
-    Psychic: 'pokeworld:psychic_attack', Dragon: 'pokeworld:dragon_attack',
-    Fairy: 'pokeworld:fairy_attack', Steel: 'pokeworld:steel_attack',
-    Dark: 'pokeworld:dark_attack', Bug: 'pokeworld:bug_attack',
-    Flying: 'pokeworld:flying_attack',
-};
-
-// Lowercase move display-name → type index; populated once at module load.
-const MOVE_TYPE_MAP = new Map<string, number>(
-    Object.entries(pokemonMoves as Record<string, { type: number }>)
-        .map(([name, data]) => [name.toLowerCase(), data.type])
-);
-
-// Lowercase move display-name → longHand move index (what Move1-Move4 stores).
-// Used to track PP decrements for all party Pokemon during the battle.
-const MOVE_NAME_TO_INDEX = new Map<string, number>(
-    Object.keys(pokemonMoves as Record<string, unknown>).map((name, i) => [name.toLowerCase(), i])
-);
-
-const MOVE_SLOTS  = ['Move1',    'Move2',    'Move3',    'Move4'   ] as const;
-const MOVE_PP_SLOTS = ['Move1_PP', 'Move2_PP', 'Move3_PP', 'Move4_PP'] as const;
+export type { MoveVfxJob } from '../battleEffects.js';
+export { computeContactMeleeDurationTicks } from '../battleEffects.js';
 
 // ─── Timing constants ──────────────────────────────────────────────────────────
 
-const LOG_QUEUE_INTERVAL_TICKS = 20;           // 1 second per log line
+const LOG_QUEUE_INTERVAL_TICKS = 20;           // 10 ticks per log line
 const BATTLE_TIMEOUT_MS        = 30 * 60 * 1000; // 30-minute safety net
 
 // ─── Session ───────────────────────────────────────────────────────────────────
 
-export interface ArenaSession {
+export interface BattleSession {
     readonly id: string;
     readonly stream: InstanceType<typeof BattleStreams.BattleStream>;
     readonly battlers: Map<'p1' | 'p2', Battler>;
@@ -73,43 +51,61 @@ export interface ArenaSession {
     ended: boolean;
     winner: string | null;
     turn: number;
-    /** Recorded faint events used for EXP/EV distribution at battle end. */
-    faintedEntries: FaintedEntry[];
-    /**
-     * Tracks which Pokemon (by set.name = speciesId) have used a move per side.
-     * Used to determine which Pokemon participated for EXP split.
-     */
-    participantNames: Map<'p1' | 'p2', Set<string>>;
+    /** FIFO queue for move particles / melee so same-turn moves do not overlap visually. */
+    moveVfxQueue: MoveVfxJob[];
+    /** True while a move-VFX job is running until its completion timeout. */
+    processingMoveVfx: boolean;
+    /** Sum of {@link MoveVfxJob.durationTicks} for jobs still queued or in progress (for {@link Battler.setFormHold}). */
+    pendingMoveVfxTotalTicks: number;
+    /** Incremented when the move-VFX queue is cleared (turn boundary / end) to invalidate stale timeouts. */
+    moveVfxGen: number;
     /** Money rewarded to the player if they beat a trainer. 0 otherwise. */
     trainerReward: number;
+    /** Arena center position for camera targeting. */
+    arenaCenter: { x: number; y: number; z: number };
+    /** Forward direction (p1 → p2) for camera offset calculation. */
+    arenaForward: { x: number; y: number; z: number };
+    /** Opponent (p2) battler kind — used for protocol chat formatting. */
+    opponentKind: BattlerKind;
+    /** Requests waiting to be received by a player*/
+    awaitingRequests: (() => void)[];
     entityInBattle(entity: Entity): boolean;
     end(): void;
+    addLog(message: RawMessage | null, onSent?: () => void): void;
+    interpret(chunk: string): void;
+    addSideRequest(callback: () => void): void;
+    getActiveEntity(identStr: string): Entity | null;
+    setTurn(turn: number): void;
 }
 
 interface LogEntry {
-    line: string;
+    message: RawMessage | null;
     onSent?: () => void;
 }
 
 // ─── Battle registry ───────────────────────────────────────────────────────────
 
-export const BATTLES = new Map<string, ArenaSession>();
+export const BATTLES = new Map<string, BattleSession>();
 
 // ─── Log queue processor ───────────────────────────────────────────────────────
 
 let logQueueInterval: number | null = null;
 
-function processLogQueue(session: ArenaSession): void {
+function sendLogLine(session: BattleSession, entry: LogEntry): void {
+    if (!entry.message) return;
+    for (const battler of session.battlers.values()) {
+        if (battler instanceof PlayerBattler && battler.player?.isValid)
+            battler.player.sendMessage(entry.message);
+    }
+    for (const spec of session.spectators) {
+        if (spec.isValid) spec.sendMessage(entry.message);
+    }
+}
+function processLogQueue(session: BattleSession): void {
     if (session.logQueue.length === 0) return;
     const entry = session.logQueue.shift()!;
-    if (entry.line) {
-        for (const battler of session.battlers.values()) {
-            if (battler instanceof PlayerBattler && battler.player?.isValid)
-                battler.player.sendMessage(`§7${entry.line}`);
-        }
-        for (const spec of session.spectators) {
-            if (spec.isValid) spec.sendMessage(`§7${entry.line}`);
-        }
+    if (entry.message) {
+        sendLogLine(session, entry);
     }
     entry.onSent?.();
 }
@@ -122,164 +118,9 @@ function startLogQueueProcessor(): void {
         }
     }, LOG_QUEUE_INTERVAL_TICKS);
 }
-
-// ─── Protocol helpers ──────────────────────────────────────────────────────────
-
-function parseProtocolLine(line: string): { cmd: string; args: string[] } {
-    if (!line.startsWith('|')) return { cmd: '', args: [] };
-    const parts = line.slice(1).split('|');
-    return { cmd: parts[0] ?? '', args: parts.slice(1) };
-}
-
-function cleanIdent(ident: string): string {
-    return ident.replace(/^p\d[a-z]?: /i, '');
-}
-
-function parseHP(condition: string): string {
-    if (!condition || condition === '0 fnt') return '§c0 HP§r';
-    return condition.split(' ')[0] ?? condition;
-}
-
-const STATUS_NAMES: Record<string, string> = {
-    par: '§e[PAR]§r', brn: '§6[BRN]§r', psn: '§5[PSN]§r',
-    tox: '§5[TOX]§r', slp: '§8[SLP]§r', frz: '§b[FRZ]§r',
-};
-
-function formatProtocolLine(line: string, p2Kind: BattlerKind = 'wild'): string | null {
-    const { cmd, args } = parseProtocolLine(line);
-    switch (cmd) {
-        case 'turn':
-            return `§8§m            §r §7Turn ${args[0]}§r §8§m            §r`;
-        case 'move': {
-            const user   = cleanIdent(args[0] ?? '');
-            const move   = args[1] ?? '?';
-            const target = args[2] ? ` on §e${cleanIdent(args[2])}§r` : '';
-            return `§e${user}§r used §b${move}§r${target}!`;
-        }
-        case 'switch':
-        case 'drag': {
-            const details  = args[1] ?? '';
-            const species  = details.split(',')[0] ?? cleanIdent(args[0] ?? '');
-            const isP1     = (args[0] ?? '').startsWith('p1');
-            if (isP1) return `§aGo, §e${species}§a!§r`;
-            return p2Kind === 'wild'
-                ? `§cA wild §e${species}§c appeared!§r`
-                : `§e${species}§r was sent out!`;
-        }
-        case '-damage':
-            return `§c${cleanIdent(args[0] ?? '')}§r lost HP! §7(${parseHP(args[1] ?? '')})§r`;
-        case '-heal':
-            return `§a${cleanIdent(args[0] ?? '')}§r recovered HP! §7(${parseHP(args[1] ?? '')})§r`;
-        case 'faint':
-            return `§e${cleanIdent(args[0] ?? '')}§c fainted!§r`;
-        case '-supereffective':
-            return `§6It's super effective!§r`;
-        case '-resisted':
-            return `§7It's not very effective...§r`;
-        case '-immune':
-            return `§7It doesn't affect §e${cleanIdent(args[0] ?? '')}§7...§r`;
-        case '-miss':
-            return `§7${cleanIdent(args[0] ?? '')} missed!§r`;
-        case '-crit':
-            return `§eA critical hit!§r`;
-        case '-status': {
-            const poke   = cleanIdent(args[0] ?? '');
-            const status = STATUS_NAMES[args[1] ?? ''] ?? args[1] ?? '';
-            return `§e${poke}§r ${status}`;
-        }
-        case '-curestatus':
-            return `§a${cleanIdent(args[0] ?? '')}§r cured its status!`;
-        case '-boost':
-            return `§e${cleanIdent(args[0] ?? '')}§r's §b${args[1] ?? '?'}§r rose by ${args[2] ?? '?'}!`;
-        case '-unboost':
-            return `§e${cleanIdent(args[0] ?? '')}§r's §c${args[1] ?? '?'}§r fell by ${args[2] ?? '?'}!`;
-        case '-weather': {
-            const w: Record<string, string> = {
-                RainDance: '§9Rain started falling.§r',
-                Sandstorm: '§6A sandstorm kicked up.§r',
-                SunnyDay:  '§eThe sunlight turned harsh.§r',
-                Hail:      '§bIt started to hail.§r',
-                none:      '§7The weather cleared up.§r',
-            };
-            return w[args[0] ?? ''] ?? null;
-        }
-        case 'win':
-            return `§a§l${args[0]}§r §awon the battle!§r`;
-        case 'tie':
-            return '§7The battle ended in a tie.§r';
-        case 'cant':
-            return `§e${cleanIdent(args[0] ?? '')}§r can't move! §7(${args[1] ?? ''})§r`;
-        case '-item':
-            return `§e${cleanIdent(args[0] ?? '')}§r is holding §b${args[1] ?? '?'}§r!`;
-        case '-ability':
-            return `§e${cleanIdent(args[0] ?? '')}§r's ability: §b${args[1] ?? '?'}§r`;
-        case 'detailschange': {
-            // Permanent in-battle forme change (evolution, e.g. Cosplay Pikachu)
-            const species = (args[1] ?? '').split(',')[0].trim();
-            return `§e${cleanIdent(args[0] ?? '')}§r became §d${species}§r!`;
-        }
-        case '-formechange': {
-            // Temporary forme change (e.g. Aegislash Shield↔Blade, Shaymin Land↔Sky)
-            const forme = args[1] ?? '?';
-            return `§e${cleanIdent(args[0] ?? '')}§r changed forme: §b${forme}§r!`;
-        }
-        case '-mega': {
-            const mega = args[1] ?? cleanIdent(args[0] ?? '');
-            return `§d§l${cleanIdent(args[0] ?? '')} Mega Evolved into Mega ${mega}!§r`;
-        }
-        case '-primal': {
-            return `§5§l${cleanIdent(args[0] ?? '')} underwent Primal Reversion!§r`;
-        }
-        case 'player': case 'teamsize': case 'gametype': case 'gen': case 'tier':
-        case 'rule': case 'start': case 't:': case 'upkeep': case '-nothing':
-        case 'clearpoke': case 'poke': case 'teampreview': case 'request': case '':
-            return null;
-        default:
-            return null;
-    }
-}
-
-// ─── Entity / sync helpers ─────────────────────────────────────────────────────
-
-/**
- * Resolve a Showdown ident string (e.g. "p1a: Pikachu") to the in-world
- * entity for that slot, or null if not yet spawned.
- */
-function getActiveEntity(battlers: Map<'p1' | 'p2', Battler>, identStr: string): Entity | null {
-    const match = identStr.match(/^(p[12])([ab])/);
-    if (!match) return null;
-    return battlers.get(match[1] as 'p1' | 'p2')?.activePokemon.get(match[2] as SlotKey) ?? null;
-}
-
-const SHOWDOWN_STATUS_MAP: Record<string, number> = {
-    psn: 1, brn: 2, par: 3, slp: 4, frz: 5, tox: 8,
-};
-
-function syncEntityCondition(entity: Entity | null, conditionId: number): void {
-    if (!entity) return;
-    try { if (entity.isValid) setScore(entity, 'condition', conditionId); } catch { /* gone */ }
-}
-
-function syncEntityHP(entity: Entity | null, hpStr: string): void {
-    if (!entity) return;
-    try {
-        if (!entity.isValid) return;
-        // Parse "current/max [status]" — also store HP_High for catch-rate calculations.
-        const match = hpStr.match(/^(\d+)(?:\/(\d+))?/);
-        if (match) {
-            setScore(entity, 'HP_Low', parseInt(match[1], 10));
-            if (match[2]) {
-                const maxHp = parseInt(match[2], 10);
-                // HP_High is the legacy name used by the catch system
-                setScore(entity, 'HP_High', maxHp);
-            }
-        }
-    } catch { /* gone */ }
-}
-
 // ─── Battle theme ──────────────────────────────────────────────────────────────
 
-function scheduleBattleTheme(player: IPlayer, session: ArenaSession): void {
+function scheduleBattleTheme(player: IPlayer, session: BattleSession): void {
     if (session.ended) {
         try { player.runCommand('stopsound @s underground.battle_theme'); } catch { /* gone */ }
         return;
@@ -288,37 +129,16 @@ function scheduleBattleTheme(player: IPlayer, session: ArenaSession): void {
     system.runTimeout(() => scheduleBattleTheme(player, session), 1825);
 }
 
-// ─── Camera animation ──────────────────────────────────────────────────────────
+// ─── Camera helpers ──────────────────────────────────────────────────────────
 
-function playBattleCameraAnimation(
-    session: ArenaSession,
-    attackerIdent: string,
-    targetIdent: string
-): void {
-    const attackerEntity = getActiveEntity(session.battlers, attackerIdent);
-    const targetEntity   = getActiveEntity(session.battlers, targetIdent);
-    if (!targetEntity?.isValid) return;
-
-    for (const battler of session.battlers.values()) {
-        if (!(battler instanceof PlayerBattler) || !battler.player?.isValid) continue;
-        const player = battler.player;
-        const atkEnt = (attackerEntity?.isValid ? attackerEntity : player) as unknown as Entity;
-
-        const atkTag = `rotbatk_${player.name.slice(0, 8).replace(/[^a-zA-Z0-9]/g, '')}`;
-        const defTag = `rotbdef_${player.name.slice(0, 8).replace(/[^a-zA-Z0-9]/g, '')}`;
-        try {
-            atkEnt.addTag(atkTag);
-            targetEntity.addTag(defTag);
-            player.runCommand(
-                `execute at @e[tag=${atkTag}] rotated ~ 0 positioned ^-4 ^6 ^-4 run camera @s set minecraft:free ease 0.1 linear pos ~~~ facing @e[tag=${defTag}]`
-            );
-            system.runTimeout(() => {
-                try { player.camera.clear(); } catch { /* gone */ }
-                try { atkEnt.removeTag(atkTag); } catch { /* gone */ }
-                try { targetEntity.removeTag(defTag); } catch { /* gone */ }
-            }, 40);
-        } catch { /* Camera errors must never crash the battle */ }
-    }
+function getControllerLocation(battler: Battler): { x: number; y: number; z: number } {
+    if (battler instanceof PlayerBattler && battler.player?.isValid)
+        return battler.player.location;
+    if (battler instanceof WildBattler && battler.entity?.isValid)
+        return battler.entity.location;
+    if (battler instanceof TrainerBattler && battler.entity?.isValid)
+        return battler.entity.location;
+    return { x: 0, y: 64, z: 0 };
 }
 
 // ─── Trainer team reader ───────────────────────────────────────────────────────
@@ -335,7 +155,7 @@ function readEntityTeam(entity: Entity): [number, string, any][] | null {
 // ─── Battle class ──────────────────────────────────────────────────────────────
 
 export class Battle {
-    private session: ArenaSession | null = null;
+    private session: BattleSession | null = null;
 
     get turn(): number { return this.session?.turn ?? 0; }
 
@@ -346,7 +166,7 @@ export class Battle {
         player: IPlayer,
         wildEntity: Entity,
         playerTeam: [number, string, any][] | null
-    ): ArenaSession | null {
+    ): BattleSession | null {
         if (!playerTeam?.length) {
             player.sendMessage('§cYou have no Pokemon to battle with!');
             return null;
@@ -357,7 +177,7 @@ export class Battle {
             }
         } catch { /* entity may already be invalid */ }
 
-        return Battle.createArena(
+        return Battle.createBattle(
             new PlayerBattler(player, 'p1', playerTeam),
             new WildBattler(wildEntity, 'p2'),
             'singles'
@@ -374,7 +194,7 @@ export class Battle {
         playerTeam: [number, string, any][] | null,
         difficulty = 0,
         gameType: GameType = 'doubles'
-    ): ArenaSession | null {
+    ): BattleSession | null {
         if (!playerTeam?.length) {
             player.sendMessage('§cYou have no Pokemon to battle with!');
             return null;
@@ -384,7 +204,7 @@ export class Battle {
             player.sendMessage('§cThis trainer has no Pokemon!');
             return null;
         }
-        return Battle.createArena(
+        return Battle.createBattle(
             new PlayerBattler(player, 'p1', playerTeam),
             new TrainerBattler(trainerEntity, 'trainer', 'p2', trainerTeam, {
                 despawnOnEnd: true,
@@ -405,7 +225,7 @@ export class Battle {
         playerTeam: [number, string, any][] | null,
         difficulty = 3,
         gameType: GameType = 'doubles'
-    ): ArenaSession | null {
+    ): BattleSession | null {
         if (!playerTeam?.length) {
             player.sendMessage('§cYou have no Pokemon to battle with!');
             return null;
@@ -415,7 +235,7 @@ export class Battle {
             player.sendMessage('§cThe gym leader has no Pokemon!');
             return null;
         }
-        return Battle.createArena(
+        return Battle.createBattle(
             new PlayerBattler(player, 'p1', playerTeam),
             new TrainerBattler(gymLeaderEntity, 'gymleader', 'p2', leaderTeam, {
                 despawnOnEnd: false,
@@ -434,19 +254,19 @@ export class Battle {
         team1: [number, string, any][] | null,
         team2: [number, string, any][] | null,
         gameType: GameType = 'doubles'
-    ): ArenaSession | null {
+    ): BattleSession | null {
         if (!team1?.length) { player1.sendMessage('§cYou have no Pokemon to battle with!'); return null; }
         if (!team2?.length) { player2.sendMessage('§cYou have no Pokemon to battle with!'); return null; }
-        return Battle.createArena(
+        return Battle.createBattle(
             new PlayerBattler(player1, 'p1', team1),
             new PlayerBattler(player2, 'p2', team2),
             gameType
         );
     }
 
-    // ── Core arena factory ──────────────────────────────────────────────────────
+    // ── Core battle factory ──────────────────────────────────────────────────────
 
-    private static createArena(p1: Battler, p2: Battler, gameType: GameType = 'singles'): ArenaSession | null {
+    private static createBattle(p1: Battler, p2: Battler, gameType: GameType = 'singles'): BattleSession | null {
         // Reject if any player battler is already in a battle.
         for (const battler of [p1, p2]) {
             if (battler instanceof PlayerBattler) {
@@ -458,7 +278,6 @@ export class Battle {
         }
 
         const stream  = new BattleStreams.BattleStream();
-        const streams = BattleStreams.getPlayerStreams(stream);
 
         // Determine trainer reward up-front (0 if not a trainer battle).
         const trainerBattler = [p1, p2].find(b => b instanceof TrainerBattler) as TrainerBattler | undefined;
@@ -469,8 +288,8 @@ export class Battle {
               )
             : 0;
 
-        const session: ArenaSession = {
-            id:               `arena_${Date.now()}_${p1.displayName}`,
+        const session: BattleSession = {
+            id:               `battle_${Date.now()}_${p1.displayName}`,
             stream,
             battlers:         new Map<'p1' | 'p2', Battler>([['p1', p1], ['p2', p2]]),
             spectators:       new Set(),
@@ -480,9 +299,15 @@ export class Battle {
             ended:            false,
             winner:           null,
             turn:             0,
-            faintedEntries:   [],
-            participantNames: new Map([['p1', new Set()], ['p2', new Set()]]),
+            moveVfxQueue:         [],
+            processingMoveVfx:    false,
+            pendingMoveVfxTotalTicks: 0,
+            moveVfxGen: 0,
             trainerReward,
+            arenaCenter:  { x: 0, y: 64, z: 0 },
+            arenaForward: { x: 0, y: 0, z: 1 },
+            opponentKind: p2.kind,
+            awaitingRequests: [],
 
             entityInBattle(entity: Entity): boolean {
                 for (const battler of this.battlers.values()) {
@@ -494,21 +319,75 @@ export class Battle {
             end(): void {
                 if (this.ended) return;
                 this.ended = true;
+                resetMoveVfxSessionState(this);
                 BATTLES.delete(this.id);
 
                 const result: BattleResult = {
-                    faintedEntries: this.faintedEntries,
-                    // Only award money to the winning player battler.
-                    trainerReward:  this.trainerReward,
+                    trainerReward: this.trainerReward,
                 };
 
                 for (const battler of this.battlers.values()) {
                     battler.onEnd(this.winner, result);
                 }
             },
+            getActiveEntity(identStr: string): Entity | null {
+                const match = identStr.match(/^(p[12])([ab])/);
+                if (!match) return null;
+                return this.battlers.get(match[1] as 'p1' | 'p2')?.activePokemon.get(match[2] as SlotKey) ?? null;
+            },
+            addLog(message: RawMessage | null, onSent?: () => void): void {
+                this.logQueue.push({ message, onSent });
+            },
+
+            interpret(chunk: string): void {
+                interpret(this, chunk);
+            },
+
+            addSideRequest(callback: () => void): void {
+                this.awaitingRequests.push(callback);
+            },
+
+            setTurn(turn: number): void {
+                if (this.ended) return;
+                this.turn = turn;
+                resetMoveVfxSessionState(this);
+                for (const callback of this.awaitingRequests) {
+                    callback();
+                }
+                this.awaitingRequests = [];
+            },
         };
 
         BATTLES.set(session.id, session);
+        p1.setBattle(session);
+        p2.setBattle(session);
+
+        // ── Compute arena layout ─────────────────────────────────────────────
+        const p1Loc = getControllerLocation(p1);
+        const p2Loc = getControllerLocation(p2);
+        const layout: ArenaLayout = computeArenaPositions(p1Loc, p2Loc, gameType);
+
+        session.arenaCenter  = layout.center;
+        const fwd = { x: p2Loc.x - p1Loc.x, y: 0, z: p2Loc.z - p1Loc.z };
+        const fwdLen = Math.sqrt(fwd.x * fwd.x + fwd.z * fwd.z);
+        session.arenaForward = fwdLen > 0.01
+            ? { x: fwd.x / fwdLen, y: 0, z: fwd.z / fwdLen }
+            : { x: 0, y: 0, z: 1 };
+
+        // Assign slot positions to each battler
+        p1.arenaSlotPositions.set('a', layout.slots.p1a);
+        p1.arenaSlotPositions.set('b', layout.slots.p1b);
+        p2.arenaSlotPositions.set('a', layout.slots.p2a);
+        p2.arenaSlotPositions.set('b', layout.slots.p2b);
+
+        // Play intro camera for all player battlers (60 ticks to hide entity placement)
+        const INTRO_TICKS = 60;
+        for (const battler of [p1, p2]) {
+            if (battler instanceof PlayerBattler && battler.player?.isValid) {
+                playIntroCameraAnimation(battler.player, layout.center, session.arenaForward, INTRO_TICKS);
+                battler.setFormHold(INTRO_TICKS);
+            }
+        }
 
         // Start battle music for all player battlers.
         for (const battler of session.battlers.values()) {
@@ -517,259 +396,51 @@ export class Battle {
         }
         startLogQueueProcessor();
 
-        const p1PackedTeam = p1.team.map(([id, sp, data]) => packLongHandToSet(data, sp, `p1_${id}`));
-        const p2PackedTeam = p2.team.map(([id, sp, data]) => packLongHandToSet(data, sp, `p2_${id}`));
-
         (async () => {
-            try {
-                // ── Start the Showdown battle ──────────────────────────────────
-                const formatid = gameType === 'doubles' ? FORMAT_DOUBLES : FORMAT_SINGLES;
-                streams.omniscient.write(`>start ${JSON.stringify({ formatid })}\n`);
-                streams.omniscient.write(
-                    `>player p1 ${JSON.stringify({ name: p1.displayName, team: p1PackedTeam })}\n`
-                );
-                streams.omniscient.write(
-                    `>player p2 ${JSON.stringify({ name: p2.displayName, team: p2PackedTeam })}\n`
-                );
-
-                // ── Wire battlers to their player streams ──────────────────────
-                const streamsBySide: Record<'p1' | 'p2', any> = {
-                    p1: streams.p1,
-                    p2: streams.p2,
-                };
-                const onRun = () => streams.omniscient.write('>forcetie\n');
-                for (const [sideKey, battler] of session.battlers) {
-                    battler.start(streamsBySide[sideKey as 'p1' | 'p2'], onRun);
+            // ── Omniscient stream loop ─────────────────────────────────────
+            for await (const chunk of stream) {
+                if (session.ended) break;
+                try { 
+                    session.interpret(chunk); 
+                } catch (err) {
+                    console.warn('[Battle] Stream error:', err);
+                    session.end();
                 }
-
-                // ── Catch context (wild battles only) ─────────────────────────
-                // Wire after start() so handler already exists.
-                if (p2 instanceof WildBattler && p1 instanceof PlayerBattler) {
-                    p1.configureCatch({
-                        getWildEntity: () => p2.entity?.isValid ? p2.entity : null,
-                        getTurn:       () => session.turn,
-                        onCaught:      () => {
-                            // The existing _catch function in Pokemon Calculations/catch.ts
-                            // already handles: party/PC assignment, messages, entity removal,
-                            // outbreak tracking, and quest progress.
-                            // We only need to end the Showdown battle session.
-                            streams.omniscient.write('>forcetie\n');
-                        },
-                    });
-                }
-
-                // ── Announce battle start ──────────────────────────────────────
-                const startMsg =
-                    p2.kind === 'wild'      ? `§6§lA wild §e${p2.displayName}§6§l appeared!§r`
-                  : p2.kind === 'gymleader' ? `§e§lGym Leader §6${p2.displayName}§e§l wants to battle!§r`
-                  : p2.kind === 'player'    ? `§e${p2.displayName}§r wants to battle!`
-                  :                          `§cTrainer §e${p2.displayName}§c wants to battle!§r`;
-                session.logQueue.push({ line: startMsg });
-
-                // Camera animation chaining — see comment on nextCameraStartTick below.
-                let nextCameraStartTick = 0;
-
-                // ── Omniscient stream loop ─────────────────────────────────────
-                for await (const chunk of streams.omniscient) {
-                    if (session.ended) break;
-                    const p2Kind = p2.kind;
-                    const lines  = (typeof chunk === 'string' ? chunk : '').split('\n');
-
-                    for (const line of lines) {
-                        if (!line.trim()) continue;
-                        console.warn(line);
-                        if (line === 'update' || line === 'sideupdate' || line === 'end') continue;
-                        if (!line.startsWith('|')) continue;
-
-                        const { cmd, args } = parseProtocolLine(line);
-
-                        // ── Turn counter ───────────────────────────────────────
-                        if (cmd === 'turn') session.turn = parseInt(args[0] ?? '0', 10) || 0;
-
-                        // ── Switch / drag ──────────────────────────────────────
-                        // Delegate completely to each battler class.
-                        if (cmd === 'switch' || cmd === 'drag') {
-                            const identStr  = args[0] ?? '';
-                            const slotMatch = identStr.match(/^(p[12])([ab])/);
-                            if (slotMatch) {
-                                const sideId  = slotMatch[1] as 'p1' | 'p2';
-                                const slot    = slotMatch[2] as SlotKey;
-                                const battler = session.battlers.get(sideId);
-                                if (battler) {
-                                    const species = (args[1] ?? '').split(',')[0].trim().toLowerCase();
-                                    battler.onSwitch(slot, species);
-                                }
-
-                                // Update foeActiveNames on opposing PlayerBattlers
-                                const oppSideId = sideId === 'p1' ? 'p2' : 'p1';
-                                const oppBattler = session.battlers.get(oppSideId);
-                                if (oppBattler instanceof PlayerBattler && oppBattler.handler) {
-                                    const displaySpecies = (args[1] ?? '').split(',')[0].trim();
-                                    const slotIndex = slot === 'a' ? 0 : 1;
-                                    oppBattler.handler.foeActiveNames[slotIndex] = displaySpecies || 'Foe';
-                                }
-                            }
-                        }
-
-                        // ── HP sync ────────────────────────────────────────────
-                        if (cmd === '-damage' || cmd === '-heal' || cmd === '-sethp') {
-                            syncEntityHP(
-                                getActiveEntity(session.battlers, args[0] ?? ''),
-                                args[1] ?? ''
-                            );
-                        }
-
-                        // ── Status / condition sync ────────────────────────────
-                        if (cmd === '-status') {
-                            syncEntityCondition(
-                                getActiveEntity(session.battlers, args[0] ?? ''),
-                                SHOWDOWN_STATUS_MAP[args[1] ?? ''] ?? 0
-                            );
-                        }
-                        if (cmd === '-curestatus' || cmd === '-cureteam') {
-                            syncEntityCondition(getActiveEntity(session.battlers, args[0] ?? ''), 0);
-                        }
-                        if (cmd === '-start' && (args[1] ?? '').toLowerCase().includes('confusion')) {
-                            syncEntityCondition(getActiveEntity(session.battlers, args[0] ?? ''), 6);
-                        }
-                        if (cmd === '-end' && (args[1] ?? '').toLowerCase().includes('confusion')) {
-                            syncEntityCondition(getActiveEntity(session.battlers, args[0] ?? ''), 0);
-                        }
-
-                        // ── Participation tracking + PP decrement on |move| ────
-                        if (cmd === 'move') {
-                            const attackerIdent = args[0] ?? '';
-                            const moveName      = args[1] ?? '';
-                            const sideMatch = attackerIdent.match(/^(p[12])/);
-                            if (sideMatch) {
-                                const attackerSide = sideMatch[1] as 'p1' | 'p2';
-                                // set.name = speciesId is the part after ": "
-                                const pokeName = attackerIdent.split(': ')[1] ?? '';
-                                if (pokeName) {
-                                    session.participantNames.get(attackerSide)?.add(pokeName);
-
-                                    // Decrement PP in longHand so benched Pokemon also get accurate PP
-                                    const battler   = session.battlers.get(attackerSide);
-                                    const teamEntry = battler?.team.find(([, sp]) => sp === pokeName);
-                                    if (teamEntry && moveName) {
-                                        const mon      = teamEntry[2] as any;
-                                        const moveIdx  = MOVE_NAME_TO_INDEX.get(moveName.toLowerCase()) ?? -1;
-                                        if (moveIdx >= 0) {
-                                            for (let m = 0; m < 4; m++) {
-                                                if (mon[MOVE_SLOTS[m]] === moveIdx) {
-                                                    mon[MOVE_PP_SLOTS[m]] = Math.max(0, (mon[MOVE_PP_SLOTS[m]] ?? 0) - 1);
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // ── Faint tracking (for EXP rewards) ─────────────────
-                        if (cmd === 'faint') {
-                            const faintedIdent = args[0] ?? ''; // "p2a: pokeworld:wild_pikachu"
-                            const faintedSideMatch = faintedIdent.match(/^(p[12])/);
-                            if (faintedSideMatch) {
-                                const faintedSide  = faintedSideMatch[1] as 'p1' | 'p2';
-                                const winnerSide   = faintedSide === 'p1' ? 'p2' : 'p1';
-                                const faintedName  = faintedIdent.split(': ')[1] ?? '';
-                                const faintedBattler = session.battlers.get(faintedSide);
-                                const faintedEntry = faintedBattler?.team.find(([, sp]) => sp === faintedName);
-                                if (faintedEntry) {
-                                    session.faintedEntries.push({
-                                        species:        faintedEntry[1],
-                                        level:          (faintedEntry[2] as any)?.level ?? 5,
-                                        attackerNames:  new Set(session.participantNames.get(winnerSide) ?? []),
-                                        attackerSideId: winnerSide,
-                                    });
-                                }
-                            }
-                        }
-
-                        // ── Camera animation + attack particle on |move| ───────
-                        //
-                        // Both |move| lines of a turn can arrive in the same chunk.
-                        // We chain animations: animation 1 starts at delay=0 (40 ticks reserved),
-                        // animation 2 starts at delay=40, etc.
-                        if (cmd === 'move') {
-                            const now = system.currentTick;
-                            if (nextCameraStartTick < now) nextCameraStartTick = now;
-
-                            const delay = nextCameraStartTick - now;
-                            nextCameraStartTick += 40;
-
-                            const attackerIdent = args[0] ?? '';
-                            const targetIdent   = args[2] ?? '';
-
-                            if (delay === 0) {
-                                playBattleCameraAnimation(session, attackerIdent, targetIdent);
-                            } else {
-                                system.runTimeout(
-                                    () => playBattleCameraAnimation(session, attackerIdent, targetIdent),
-                                    delay
-                                );
-                            }
-
-                            // Hold battle menu for all player battlers until animations finish.
-                            for (const battler of session.battlers.values()) {
-                                battler.setFormHold(nextCameraStartTick - now);
-                            }
-
-                            // Spawn attack particle on the target when the camera ends (delay + 40).
-                            const moveName = args[1] ?? '';
-                            if (moveName && targetIdent && !targetIdent.startsWith('[')) {
-                                const typeNum  = MOVE_TYPE_MAP.get(moveName.toLowerCase()) ?? 0;
-                                const typeName = (TypeList[typeNum] as string | undefined) ?? 'None';
-                                const particle = ATTACK_PARTICLES[typeName] ?? '';
-                                if (particle) {
-                                    const entitySnap = getActiveEntity(session.battlers, targetIdent);
-                                    if (entitySnap) {
-                                        system.runTimeout(() => {
-                                            try {
-                                                if (entitySnap.isValid)
-                                                    entitySnap.dimension.spawnParticle(particle, entitySnap.location);
-                                            } catch { /* ignore */ }
-                                        }, delay + 40);
-                                    }
-                                }
-                            }
-                        }
-
-                        // ── Log to chat ────────────────────────────────────────
-                        const formatted = formatProtocolLine(line, p2Kind);
-                        if (formatted) session.logQueue.push({ line: formatted });
-
-                        // ── Battle end ─────────────────────────────────────────
-                        if (cmd === 'win') {
-                            session.winner = args[0] ?? null;
-                            // Send personalised win/lose messages to each player battler.
-                            for (const battler of session.battlers.values()) {
-                                if (battler instanceof PlayerBattler && battler.player?.isValid) {
-                                    const isWinner = session.winner === battler.player.name;
-                                    battler.player.sendMessage(
-                                        isWinner
-                                            ? '§a§lYou won the battle!§r'
-                                            : '§c§lYou lost the battle...§r'
-                                    );
-                                }
-                            }
-                            session.logQueue.push({ line: '', onSent: () => session.end() });
-                        }
-                        if (cmd === 'tie') {
-                            session.logQueue.push({
-                                line: '§7The battle ended in a tie.§r',
-                                onSent: () => session.end(),
-                            });
-                        }
-                    }
-                }
-            } catch (err) {
-                console.warn('[Battle] Stream error:', err);
-                session.end();
             }
         })();
+
+        system.runTimeout(async () => {
+            // ── Announce battle start ──────────────────────────────────────
+            const startMsg =
+            p2.kind === 'wild'      ? `§6§lA wild §e${p2.displayName}§6§l appeared!§r`
+            : p2.kind === 'gymleader' ? `§e§lGym Leader §6${p2.displayName}§e§l wants to battle!§r`
+            : p2.kind === 'player'    ? `§e${p2.displayName}§r wants to battle!`
+            :                          `§cTrainer §e${p2.displayName}§c wants to battle!§r`;
+            session.addLog({ text: startMsg });
+
+            // ── Start the Showdown battle ──────────────────────────────────
+            session.stream._write(`>start ${JSON.stringify({
+                effectType: 'Format',
+                mod: 'underground',
+                name: gameType,
+                gameType: gameType,
+                ruleset: [],
+                playerCount: 2,
+                banlist: [],
+                rated: false,
+              })}`);
+
+            let battlerIndex = 1
+            for (const battler of session.battlers.values()) {
+                try {
+                    session.stream._write(`>player p${battlerIndex} ${JSON.stringify({ name: battler.displayName, team: battler.team.map(([id, sp, data]) => packLongHandToSet(data, sp, `p${battlerIndex}_${id}`)) })}`);
+                    await system.waitTicks(1);
+                    battlerIndex++;
+                } catch (err) {
+                    console.warn(`[Battle] Error initializing battler ${battlerIndex}:`, err);
+                }
+            }
+        }, 20)
 
         // Safety-net timeout.
         system.runTimeout(() => {
@@ -791,7 +462,7 @@ export class Battle {
 
 // ─── Utility exports ───────────────────────────────────────────────────────────
 
-export function getBattleSessionForPlayer(playerName: string): ArenaSession | null {
+export function getBattleSessionForPlayer(playerName: string): BattleSession | null {
     for (const session of BATTLES.values()) {
         for (const battler of session.battlers.values()) {
             if (battler instanceof PlayerBattler && battler.player?.name === playerName)
@@ -810,7 +481,7 @@ export function getBattleForCatch(playerName: string): { turn: number } {
  * Spectators receive all log messages but cannot send commands.
  * Returns false if the session is already ended or the player is already a battler/spectator.
  */
-export function addSpectator(session: ArenaSession, player: IPlayer): boolean {
+export function addSpectator(session: BattleSession, player: IPlayer): boolean {
     if (session.ended) return false;
     if (session.entityInBattle(player as any)) return false;
     if (session.spectators.has(player)) return false;
@@ -822,7 +493,7 @@ export function addSpectator(session: ArenaSession, player: IPlayer): boolean {
 /**
  * Remove a spectator from a battle session.
  */
-export function removeSpectator(session: ArenaSession, player: IPlayer): boolean {
+export function removeSpectator(session: BattleSession, player: IPlayer): boolean {
     return session.spectators.delete(player);
 }
 

@@ -7,7 +7,7 @@ import wildPokemon from "../../Letters/pokemon/wild.js";
 import './pokeCreate.js';
 import { getRandomMoves } from "./moves.js";
 
-export const deployed = {} as { [name: string]: [pokemonId: number, index: number, instanceId: string] },
+export const deployed = {} as { [name: string]: [pokemonId: number, index: number, instanceId: string][] },
     keys = Object.keys(pokemoneNatures.constants) as Pokemon.property[];
 
 export function math(entity: Entity, player: Player) {

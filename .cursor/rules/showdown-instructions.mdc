@@ -1,0 +1,135 @@
+---
+alwaysApply: false
+---
+# Pokémon Showdown battle stream (output) — protocol reference
+
+Use this when implementing or debugging a **client** that consumes `BattleStream` output (Minecraft, UI, logging, etc.). The simulator sends **discrete chunks**; each chunk is one string whose **first line** is the chunk **type**. Parse with `split('\n')` and branch on `lines[0]`.
+
+---
+
+## 1. Top-level chunk types
+
+Typical stream messages look like:
+
+```text
+<type>
+<payload lines...>
+```
+
+Common types:
+
+| Type | Role |
+|------|------|
+| `update` | Public battle log: turn actions, damage, switches, weather text, etc. May include `|split|` sub-blocks (see below). |
+| `sideupdate` | **Private** to one side: choices (`|request|`), errors (`|error|`), etc. |
+| `end` | Battle finished; second line is JSON summary (winner, turns, etc.). |
+
+Your interpreter should handle each type in a **switch** or `if/else` on the first line. Chunks you do not recognize should be ignored or logged, not assumed to be `update`.
+
+---
+
+## 2. `update` chunks
+
+**Shape:**
+
+```text
+update
+|instruction|
+|instruction|
+...
+```
+
+**Parsing:**
+
+1. Remove the first line (`update`).
+2. Iterate remaining lines; skip empty lines and bare `|` separators if your source emits them.
+3. For each line, either it is a **split header** or a **normal protocol line**.
+
+### 2a Normal lines
+
+Each line is one Showdown log line (starts with `|`). Route by **prefix** (e.g. `|move|`, `|turn|`, `|-damage|`, `|faint|`). Many handlers need the **full line string**; some also need **lookahead** into the **rest of the queue** (same chunk) for related lines that follow.
+
+**Convention:** pass `(currentLine, remainingLines)` or equivalent so handlers can inspect upcoming lines without consuming them incorrectly.
+
+### 2b `|split|` blocks (split update)
+
+Some information is **different for the owning player vs everyone else** (e.g. exact HP vs percentage). Showdown emits a **split** block:
+
+```text
+|split|<sideId>
+<privateLine>
+<publicLine>
+```
+
+- **`<sideId>`** — Which player this split belongs to, e.g. `p1`, `p2` (same id used in `>player` / choices). Read it from the split header line (e.g. after `|split|`).
+- **Line order:** First following line = **private** (full detail for that side). Second following line = **public** (what spectators and the opponent see).
+
+**Routing:** Decide which handler to run by matching the **private** line’s prefix against your split-handler table (private and public usually share the same *kind* of message, e.g. both `|-damage|`, but text differs).
+
+**Handler arguments:** Always pass **both** strings into the handler:
+
+- **Public line** — for UI/log that everyone should see, or for updating “public” state.
+- **Private line** — for exact HP, precise details, or syncing the owning player’s model.
+
+Names in code can be `publicMessage` / `privateMessage` or `publicLine` / `privateLine`; order in the API should be documented and kept consistent.
+
+**Consumption:** After reading the split header, **shift** two lines from the queue (private, then public). Do not treat those two lines as separate top-level `update` instructions.
+
+---
+
+## 3. `sideupdate` chunks
+
+**Shape:**
+
+```text
+sideupdate
+<sideId>
+<singleLine>
+```
+
+- **`lines[1]`** — Side id (`p1`, `p2`, …).
+- **`lines[2]`** — One full protocol line, typically `|request|{...json}` or `|error|...`.
+
+There is **no** split inside `sideupdate`; the whole request/error is in that one line.
+
+**Parsing `|request|`:** The JSON payload usually starts after the `|request|` prefix (length depends on exact format; strip the known prefix and `JSON.parse` the rest).
+
+**Parsing `|error|`:** Treat the remainder as a human-readable or structured error string per your fork’s behavior.
+
+---
+
+## 4. `end` chunks
+
+**Shape:**
+
+```text
+end
+{...json...}
+```
+
+- **`lines[1]`** — Single JSON object as a string (`JSON.parse`). Fields vary by simulator (winner id, turn count, etc.).
+
+Use this to stop reading the stream, show results, and tear down battle state.
+
+---
+
+## 5. Design rules for a robust client
+
+1. **One chunk = one `interpret` call** — Do not assume all `update` lines arrive in one OS write; but **within** one chunk, process lines in order.
+2. **Split is atomic** — Header + two lines belong together; never run a normal-line handler on the private/public lines of a split without removing them from the queue as a unit.
+3. **Request vs turn order** — Private `|request|` often arrives in `sideupdate`; public `|turn|` may arrive in `update`. If you must delay “choice UI” until animations/log finish, **queue** request handling until your turn-boundary logic runs (do not rely on arrival order alone).
+4. **Prefix tables** — Maintain two maps if needed: one for **update** lines, one for **split** (keys matched against **private** line prefix).
+5. **Unknown lines** — Log and continue; Showdown adds new protocol lines over time.
+
+---
+
+## 6. Quick argument summary
+
+| Chunk | What to extract |
+|-------|------------------|
+| `update` | All lines after first; iterate; handle `|split|id` + two sub-lines specially. |
+| `split` | `sideId` from header; `privateLine` = next line; `publicLine` = line after that. |
+| `sideupdate` | `sideId` = second line; full `request`/`error` line = third line. |
+| `end` | JSON = second line. |
+
+This document is **protocol-oriented**; naming of classes (`Battle`, `Interpreter`, etc.) and exact handler signatures are left to your project.
