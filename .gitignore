@@ -1,5 +1,5 @@
 *.js
 *.js
-/scripts
-/node_modules
-/.cursor
+scripts/
+node_modules/
+.cursor/
